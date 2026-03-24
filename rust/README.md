@@ -1,11 +1,11 @@
 # lean-ctx
 
-**Hybrid Context Optimizer — Shell Hook + MCP Server. Single Rust binary, zero dependencies.**
+**Hybrid Context Optimizer with Token Dense Dialect (TDD). Shell Hook + MCP Server. Single Rust binary, zero dependencies.**
 
 [![Crates.io](https://img.shields.io/crates/v/lean-ctx)](https://crates.io/crates/lean-ctx)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-[Website](https://lean-ctx.pounce.ch) · [Install](#installation) · [Quick Start](#quick-start) · [CLI Reference](#cli-commands) · [MCP Tools](#8-mcp-tools) · [vs RTK](#lean-ctx-vs-rtk)
+[Website](https://leanctx.com) · [Install](#installation) · [Quick Start](#quick-start) · [CLI Reference](#cli-commands) · [MCP Tools](#8-mcp-tools) · [vs RTK](#lean-ctx-vs-rtk)
 
 ---
 
@@ -56,9 +56,34 @@ cp target/release/lean-ctx ~/.local/bin/
 ### Verify Installation
 
 ```bash
-lean-ctx --version   # Should show "lean-ctx 1.3.1"
+lean-ctx --version   # Should show "lean-ctx 1.2.2"
 lean-ctx gain        # Should show token savings stats
 ```
+
+## Token Dense Dialect (TDD)
+
+lean-ctx v1.3.1 introduces **TDD mode** — enabled by default. TDD compresses LLM communication using mathematical symbols and short identifiers:
+
+| Symbol | Meaning |
+|---|---|
+| `λ` | function/handler |
+| `§` | struct/class/module |
+| `∂` | interface/trait |
+| `τ` | type alias |
+| `ε` | enum |
+| `α1, α2...` | short identifier IDs |
+
+**How it works:**
+- Signatures use compact notation: `λ+handle(⊕,path:s)→s` instead of `fn pub async handle(&self, path: String) -> String`
+- Long identifiers (>12 chars) are mapped to `α1, α2...` with a `§MAP` at the end
+- MCP instructions tell the LLM to respond in Token Dense Dialect — shorter responses, less thinking tokens
+
+**Result**: 8-25% additional savings on top of existing compression.
+
+Configure with `LEAN_CTX_CRP_MODE`:
+- `tdd` (default) — Maximum compression with symbol shorthand
+- `compact` — Moderate: skip filler words, use abbreviations
+- `off` — Standard output, no CRP instructions
 
 ## Quick Start
 

@@ -203,6 +203,7 @@ impl LeanCtxServer {
 
         let total_original: u64 = calls.iter().map(|c| c.original_tokens as u64).sum();
         let total_saved: u64 = calls.iter().map(|c| c.saved_tokens as u64).sum();
+        let total_compressed = total_original.saturating_sub(total_saved);
         let compression_rate = if total_original > 0 {
             total_saved as f64 / total_original as f64
         } else {
@@ -214,9 +215,10 @@ impl LeanCtxServer {
         let mode_diversity = (modes_used.len() as f64 / 6.0).min(1.0);
         let cache_util = stats.hit_rate() / 100.0;
         let cep_score = cache_util * 0.3 + mode_diversity * 0.2 + compression_rate * 0.5;
+        let cep_score_u32 = (cep_score * 100.0).round() as u32;
 
         let live = serde_json::json!({
-            "cep_score": (cep_score * 100.0).round() as u32,
+            "cep_score": cep_score_u32,
             "cache_utilization": (cache_util * 100.0).round() as u32,
             "mode_diversity": (mode_diversity * 100.0).round() as u32,
             "compression_rate": (compression_rate * 100.0).round() as u32,
@@ -230,12 +232,36 @@ impl LeanCtxServer {
             "updated_at": chrono::Local::now().to_rfc3339(),
         });
 
+        let mut mode_counts: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        for call in calls.iter() {
+            if let Some(ref mode) = call.mode {
+                *mode_counts.entry(mode.clone()).or_insert(0) += 1;
+            }
+        }
+
+        let tool_call_count = calls.len() as u64;
+        let complexity_str = format!("{:?}", complexity);
+        let cache_hits = stats.cache_hits;
+        let total_reads = stats.total_reads;
+
         drop(cache);
         drop(calls);
 
         if let Some(dir) = dirs::home_dir().map(|h| h.join(".lean-ctx")) {
             let _ = std::fs::write(dir.join("mcp-live.json"), live.to_string());
         }
+
+        crate::core::stats::record_cep_session(
+            cep_score_u32,
+            cache_hits,
+            total_reads,
+            total_original,
+            total_compressed,
+            &mode_counts,
+            tool_call_count,
+            &complexity_str,
+        );
     }
 }
 

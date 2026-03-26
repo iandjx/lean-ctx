@@ -41,6 +41,10 @@ fn main() {
                 println!("{output}");
                 return;
             }
+            "cep" => {
+                println!("{}", core::stats::format_cep_report());
+                return;
+            }
             "dashboard" => {
                 let port = rest
                     .first()
@@ -209,6 +213,7 @@ COMMANDS:
     gain --graph                   30-day savings chart
     gain --daily                   Bordered day-by-day table with USD
     gain --json                    Raw JSON export of all stats
+    cep                            CEP impact report (score trends, cache, modes)
     dashboard [--port=N]           Open web dashboard (default: http://localhost:3333)
     wrapped [--week|--month|--all] Savings report card (shareable)
     sessions [list|show|cleanup]   Manage CCP sessions (~/.lean-ctx/sessions/)

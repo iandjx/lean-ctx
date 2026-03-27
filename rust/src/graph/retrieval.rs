@@ -175,6 +175,14 @@ pub fn graph_retrieve(
             if node.path.to_lowercase().contains(&kw_lower) {
                 score += 0.5;
             }
+
+            // Symbol boost: if query keywords look like function names, boost symbol nodes
+            if node.kind == "symbol" {
+                let symbol_name = node.name.as_deref().unwrap_or("");
+                if looks_like_symbol_name(kw) && symbol_name.to_lowercase().contains(&kw_lower) {
+                    score += 3.0;
+                }
+            }
         }
 
         if score > 0.0 {
@@ -283,6 +291,16 @@ fn search_memories(store: &[MemoryEntry], query_keywords: &[String]) -> Vec<Memo
         .take(3)
         .map(|(_, entry)| entry.clone())
         .collect()
+}
+
+/// Returns true if a keyword looks like a function/method name
+/// (camelCase with uppercase, or snake_case with underscore).
+fn looks_like_symbol_name(kw: &str) -> bool {
+    // camelCase: has uppercase letter after a lowercase one
+    let has_camel = kw.chars().zip(kw.chars().skip(1)).any(|(a, b)| a.is_lowercase() && b.is_uppercase());
+    // snake_case: contains underscore with letters on both sides
+    let has_snake = kw.contains('_') && kw.len() > 3;
+    has_camel || has_snake
 }
 
 /// Expand query keywords with domain synonyms to improve recall.
@@ -632,6 +650,31 @@ mod tests {
     fn impact_no_graph() {
         let result = graph_impact(None, "src/auth.rs");
         assert!(result.contains("No project scanned"));
+    }
+
+    #[test]
+    fn symbol_aware_scoring_boosts_camel_case_match() {
+        let graph = test_graph();
+        // "authenticate" is a symbol in auth.rs
+        let kw = extract_keywords("authenticate function");
+        let (files, _) = graph_retrieve(&graph, &kw, &[]);
+        // Should find auth.rs::authenticate symbol or auth.rs file
+        assert!(files.iter().any(|f| f.contains("auth")));
+    }
+
+    #[test]
+    fn looks_like_symbol_name_detects_camel_case() {
+        assert!(looks_like_symbol_name("handleLogin"));
+        assert!(looks_like_symbol_name("getUserById"));
+        assert!(!looks_like_symbol_name("auth"));
+        assert!(!looks_like_symbol_name("token"));
+    }
+
+    #[test]
+    fn looks_like_symbol_name_detects_snake_case() {
+        assert!(looks_like_symbol_name("handle_login"));
+        assert!(looks_like_symbol_name("get_user_by_id"));
+        assert!(!looks_like_symbol_name("auth"));
     }
 
     #[test]

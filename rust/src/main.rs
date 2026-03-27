@@ -4,6 +4,7 @@ mod cli;
 mod core;
 mod dashboard;
 mod doctor;
+mod graph;
 mod hooks;
 mod server;
 mod shell;

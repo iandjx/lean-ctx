@@ -1,0 +1,591 @@
+use std::collections::HashSet;
+
+use crate::graph::types::{InfoGraph, MemoryEntry};
+
+/// Result of a `graph_continue` call.
+#[derive(Debug)]
+pub struct ContinueResult {
+    pub ok: bool,
+    pub needs_project: bool,
+    pub skip: bool,
+    pub mode: String,
+    pub confidence: String,
+    pub recommended_files: Vec<String>,
+    pub memories: Vec<MemoryEntry>,
+    pub max_supplementary_greps: usize,
+    pub max_supplementary_files: usize,
+}
+
+impl ContinueResult {
+    pub fn to_json(&self) -> String {
+        let memories_json: Vec<String> = self
+            .memories
+            .iter()
+            .map(|m| {
+                format!(
+                    r#"{{"kind":"{}","content":"{}","tags":{}}}"#,
+                    m.kind,
+                    m.content.replace('"', "\\\""),
+                    serde_json::to_string(&m.tags).unwrap_or_else(|_| "[]".to_string())
+                )
+            })
+            .collect();
+
+        format!(
+            r#"{{"ok":{},"needs_project":{},"skip":{},"mode":"{}","confidence":"{}","recommended_files":{},"memories":[{}],"max_supplementary_greps":{},"max_supplementary_files":{}}}"#,
+            self.ok,
+            self.needs_project,
+            self.skip,
+            self.mode,
+            self.confidence,
+            serde_json::to_string(&self.recommended_files).unwrap_or_else(|_| "[]".to_string()),
+            memories_json.join(","),
+            self.max_supplementary_greps,
+            self.max_supplementary_files,
+        )
+    }
+}
+
+/// Main retrieval orchestrator. Called on every turn before file reads.
+pub fn graph_continue(
+    info_graph: Option<&InfoGraph>,
+    context_store: &[MemoryEntry],
+    query: &str,
+) -> ContinueResult {
+    // 1. No graph loaded?
+    let graph = match info_graph {
+        Some(g) => g,
+        None => {
+            return ContinueResult {
+                ok: true,
+                needs_project: true,
+                skip: false,
+                mode: "scan_needed".to_string(),
+                confidence: "low".to_string(),
+                recommended_files: vec![],
+                memories: vec![],
+                max_supplementary_greps: 0,
+                max_supplementary_files: 0,
+            };
+        }
+    };
+
+    // 2. Fewer than 5 files?
+    if graph.file_count < 5 {
+        return ContinueResult {
+            ok: true,
+            needs_project: false,
+            skip: true,
+            mode: "small_project".to_string(),
+            confidence: "high".to_string(),
+            recommended_files: vec![],
+            memories: vec![],
+            max_supplementary_greps: 0,
+            max_supplementary_files: 0,
+        };
+    }
+
+    // 3. Search context store for matching memories
+    let query_keywords = extract_keywords(query);
+    let matching_memories = search_memories(context_store, &query_keywords);
+
+    if !matching_memories.is_empty() {
+        // Collect files from matching memories
+        let mut files: Vec<String> = Vec::new();
+        for mem in &matching_memories {
+            for f in &mem.files {
+                if !files.contains(f) {
+                    files.push(f.clone());
+                }
+            }
+        }
+        return ContinueResult {
+            ok: true,
+            needs_project: false,
+            skip: false,
+            mode: "memory_hit".to_string(),
+            confidence: "high".to_string(),
+            recommended_files: files,
+            memories: matching_memories,
+            max_supplementary_greps: 0,
+            max_supplementary_files: 0,
+        };
+    }
+
+    // 4. Run graph retrieval
+    let (recommended, confidence) = graph_retrieve(graph, &query_keywords);
+
+    let (max_greps, max_files) = caps_for_confidence(&confidence);
+
+    ContinueResult {
+        ok: true,
+        needs_project: false,
+        skip: false,
+        mode: "retrieve_then_read".to_string(),
+        confidence,
+        recommended_files: recommended,
+        memories: vec![],
+        max_supplementary_greps: max_greps,
+        max_supplementary_files: max_files,
+    }
+}
+
+/// Keyword-matched graph retrieval. Scores nodes and returns top files.
+pub fn graph_retrieve(
+    graph: &InfoGraph,
+    query_keywords: &[String],
+) -> (Vec<String>, String) {
+    if query_keywords.is_empty() {
+        return (vec![], "low".to_string());
+    }
+
+    // Score each node
+    let mut scores: Vec<(String, f64)> = Vec::new();
+    let mut scored_set: HashSet<String> = HashSet::new();
+
+    for node in &graph.nodes {
+        let mut score: f64 = 0.0;
+
+        for kw in query_keywords {
+            let kw_lower = kw.to_lowercase();
+
+            // +2.0 per keyword match in node.keywords
+            if node.keywords.iter().any(|k| k.to_lowercase().contains(&kw_lower)) {
+                score += 2.0;
+            }
+
+            // +1.5 per keyword match in node.summary
+            if let Some(ref summary) = node.summary {
+                if summary.to_lowercase().contains(&kw_lower) {
+                    score += 1.5;
+                }
+            }
+
+            // +1.0 per keyword match in node.content (substring)
+            if let Some(ref content) = node.content {
+                if content.to_lowercase().contains(&kw_lower) {
+                    score += 1.0;
+                }
+            }
+
+            // +0.5 per keyword match in node.id/path
+            if node.path.to_lowercase().contains(&kw_lower) {
+                score += 0.5;
+            }
+        }
+
+        if score > 0.0 {
+            // Use the file path (not symbol ID) as the key for dedup
+            let key = if node.kind == "symbol" {
+                // For symbols, use the full file::symbol ID
+                node.id.clone()
+            } else {
+                node.path.clone()
+            };
+            if !scored_set.contains(&key) {
+                scores.push((key.clone(), score));
+                scored_set.insert(key);
+            }
+        }
+    }
+
+    // Boost nodes connected to high-scoring nodes via edges
+    let high_score_nodes: HashSet<String> = scores
+        .iter()
+        .filter(|(_, s)| *s > 3.0)
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    for edge in &graph.edges {
+        if high_score_nodes.contains(&edge.from) {
+            if let Some(entry) = scores.iter_mut().find(|(id, _)| id == &edge.to) {
+                entry.1 += 0.5;
+            }
+        }
+        if high_score_nodes.contains(&edge.to) {
+            if let Some(entry) = scores.iter_mut().find(|(id, _)| id == &edge.from) {
+                entry.1 += 0.5;
+            }
+        }
+    }
+
+    // Sort by score descending
+    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Take top 5-8 files
+    let top_count = if scores.len() > 5 { 8 } else { 5 };
+    let recommended: Vec<String> = scores
+        .iter()
+        .take(top_count)
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    // Determine confidence
+    let top_score = scores.first().map_or(0.0, |(_, s)| *s);
+    let match_count = scores.iter().filter(|(_, s)| *s > 1.0).count();
+
+    let confidence = if top_score > 6.0 && match_count >= 3 {
+        "high".to_string()
+    } else if top_score > 3.0 {
+        "medium".to_string()
+    } else {
+        "low".to_string()
+    };
+
+    (recommended, confidence)
+}
+
+/// Search memories for entries matching the query keywords.
+fn search_memories(store: &[MemoryEntry], query_keywords: &[String]) -> Vec<MemoryEntry> {
+    let mut matches: Vec<(usize, &MemoryEntry)> = Vec::new();
+
+    for entry in store {
+        if entry.stale == Some(true) {
+            continue;
+        }
+
+        let mut overlap = 0;
+        for kw in query_keywords {
+            if entry.tags.iter().any(|t| t.to_lowercase().contains(&kw.to_lowercase())) {
+                overlap += 2;
+            }
+            if entry.content.to_lowercase().contains(&kw.to_lowercase()) {
+                overlap += 1;
+            }
+        }
+
+        if overlap >= 2 {
+            matches.push((overlap, entry));
+        }
+    }
+
+    // Sort by overlap score descending
+    matches.sort_by(|a, b| b.0.cmp(&a.0));
+
+    // Return top 3 matches
+    matches
+        .into_iter()
+        .take(3)
+        .map(|(_, entry)| entry.clone())
+        .collect()
+}
+
+/// Extract keywords from a query string.
+pub fn extract_keywords(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|w| w.len() >= 3)
+        .filter(|w| !is_stop_word(w))
+        .map(|w| w.to_lowercase())
+        .collect()
+}
+
+/// Get exploration caps based on confidence level.
+fn caps_for_confidence(confidence: &str) -> (usize, usize) {
+    let max_greps = std::env::var("DG_FALLBACK_MAX_CALLS_PER_TURN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
+
+    match confidence {
+        "high" => (0, 0),
+        "medium" => (max_greps, 2),
+        _ => (max_greps, 3),
+    }
+}
+
+fn is_stop_word(word: &str) -> bool {
+    matches!(
+        word.to_lowercase().as_str(),
+        "the" | "and" | "for" | "are" | "but" | "not" | "you" | "all" | "can" | "her"
+            | "was" | "one" | "our" | "out" | "has" | "how" | "its" | "let" | "may"
+            | "new" | "now" | "old" | "see" | "way" | "who" | "did" | "get" | "got"
+            | "him" | "his" | "had" | "use" | "does" | "this" | "that" | "with"
+            | "from" | "have" | "been" | "will" | "what" | "when" | "where" | "which"
+    )
+}
+
+/// Handle `fallback_rg` — shells out to ripgrep with hard caps.
+pub fn fallback_rg(pattern: &str, project_root: Option<&str>, max_hits: usize) -> String {
+    let root = project_root.unwrap_or(".");
+
+    let output = std::process::Command::new("rg")
+        .arg("--max-count")
+        .arg(max_hits.to_string())
+        .arg("--no-heading")
+        .arg("--line-number")
+        .arg("--color=never")
+        .arg(pattern)
+        .arg(root)
+        .output();
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout.is_empty() {
+                format!("No matches for '{pattern}'")
+            } else {
+                // Truncate to reasonable size
+                let lines: Vec<&str> = stdout.lines().take(max_hits).collect();
+                format!("{} match(es):\n{}", lines.len(), lines.join("\n"))
+            }
+        }
+        Err(e) => format!("fallback_rg error: {e}. Is ripgrep (rg) installed?"),
+    }
+}
+
+/// Handle `graph_impact` — show what depends on a file (2-level deep).
+pub fn graph_impact(info_graph: Option<&InfoGraph>, file: &str) -> String {
+    let graph = match info_graph {
+        Some(g) => g,
+        None => return "No project scanned. Call graph_scan first.".to_string(),
+    };
+
+    let mut level1: Vec<(&str, &str)> = Vec::new();
+    let mut level2: Vec<(&str, &str, &str)> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    seen.insert(file);
+
+    // Level 1: direct connections
+    for edge in &graph.edges {
+        if edge.from == file || edge.from.starts_with(&format!("{file}::")) {
+            if !seen.contains(edge.to.as_str()) {
+                level1.push((&edge.to, &edge.rel));
+                seen.insert(&edge.to);
+            }
+        }
+        if edge.to == file || edge.to.starts_with(&format!("{file}::")) {
+            if !seen.contains(edge.from.as_str()) {
+                level1.push((&edge.from, &edge.rel));
+                seen.insert(&edge.from);
+            }
+        }
+    }
+
+    // Level 2: connections of connections
+    let level1_ids: Vec<&str> = level1.iter().map(|(id, _)| *id).collect();
+    for l1_id in &level1_ids {
+        for edge in &graph.edges {
+            if edge.from == *l1_id && !seen.contains(edge.to.as_str()) {
+                level2.push((&edge.to, &edge.rel, l1_id));
+                seen.insert(&edge.to);
+            }
+            if edge.to == *l1_id && !seen.contains(edge.from.as_str()) {
+                level2.push((&edge.from, &edge.rel, l1_id));
+                seen.insert(&edge.from);
+            }
+        }
+    }
+
+    if level1.is_empty() {
+        return format!("No impact found for '{file}'.");
+    }
+
+    let mut output = format!("Impact of '{file}':\n\nDirect (depth 1):\n");
+    for (target, rel) in &level1 {
+        output.push_str(&format!("  {file} --[{rel}]--> {target}\n"));
+    }
+
+    if !level2.is_empty() {
+        output.push_str("\nIndirect (depth 2):\n");
+        for (target, rel, via) in &level2 {
+            output.push_str(&format!("  {via} --[{rel}]--> {target}\n"));
+        }
+    }
+
+    output.push_str(&format!(
+        "\nTotal: {} direct, {} indirect",
+        level1.len(),
+        level2.len()
+    ));
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::types::{GraphEdge, GraphNode};
+
+    fn test_graph() -> InfoGraph {
+        InfoGraph {
+            root: "/tmp".to_string(),
+            node_count: 4,
+            edge_count: 3,
+            file_count: 5,
+            symbol_count: 1,
+            nodes: vec![
+                GraphNode {
+                    id: "src/auth.rs".to_string(),
+                    kind: "file".to_string(),
+                    path: "src/auth.rs".to_string(),
+                    keywords: vec!["auth".to_string(), "token".to_string(), "jwt".to_string()],
+                    summary: Some("Authentication module using JWT tokens".to_string()),
+                    content: Some("pub fn authenticate(token: &str) -> bool { true }".to_string()),
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: "src/db.rs".to_string(),
+                    kind: "file".to_string(),
+                    path: "src/db.rs".to_string(),
+                    keywords: vec!["database".to_string(), "query".to_string(), "connection".to_string()],
+                    summary: Some("Database connection pool and queries".to_string()),
+                    content: Some("pub fn connect() -> Pool { Pool::new() }".to_string()),
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: "src/api.rs".to_string(),
+                    kind: "file".to_string(),
+                    path: "src/api.rs".to_string(),
+                    keywords: vec!["api".to_string(), "handler".to_string(), "endpoint".to_string()],
+                    summary: Some("API endpoint handlers".to_string()),
+                    content: Some("use auth; use db;\npub fn handle() {}".to_string()),
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: "src/auth.rs::authenticate".to_string(),
+                    kind: "symbol".to_string(),
+                    path: "src/auth.rs".to_string(),
+                    keywords: vec!["authenticate".to_string()],
+                    ..Default::default()
+                },
+            ],
+            edges: vec![
+                GraphEdge {
+                    from: "src/api.rs".to_string(),
+                    to: "src/auth.rs".to_string(),
+                    rel: "imports".to_string(),
+                },
+                GraphEdge {
+                    from: "src/api.rs".to_string(),
+                    to: "src/db.rs".to_string(),
+                    rel: "imports".to_string(),
+                },
+                GraphEdge {
+                    from: "src/auth.rs".to_string(),
+                    to: "src/auth.rs::authenticate".to_string(),
+                    rel: "exports".to_string(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn extract_keywords_basic() {
+        let kw = extract_keywords("how does authentication work with JWT tokens");
+        assert!(kw.contains(&"authentication".to_string()));
+        assert!(kw.contains(&"work".to_string()));
+        assert!(kw.contains(&"tokens".to_string()));
+        // "how", "does", "with" should be filtered as stop words or too short
+        assert!(!kw.contains(&"how".to_string()));
+    }
+
+    #[test]
+    fn retrieve_finds_relevant_files() {
+        let graph = test_graph();
+        let keywords = extract_keywords("authentication token JWT");
+        let (files, confidence) = graph_retrieve(&graph, &keywords);
+
+        assert!(!files.is_empty(), "should find matching files");
+        assert_eq!(files[0], "src/auth.rs", "auth.rs should be top match");
+        assert!(
+            confidence == "high" || confidence == "medium",
+            "confidence should be medium or high, got {confidence}"
+        );
+    }
+
+    #[test]
+    fn retrieve_database_query() {
+        let graph = test_graph();
+        let keywords = extract_keywords("database connection query");
+        let (files, _) = graph_retrieve(&graph, &keywords);
+
+        assert!(!files.is_empty());
+        assert!(
+            files.iter().any(|f| f.contains("db.rs")),
+            "should include db.rs"
+        );
+    }
+
+    #[test]
+    fn retrieve_no_match() {
+        let graph = test_graph();
+        let keywords = extract_keywords("zzznonexistent");
+        let (files, confidence) = graph_retrieve(&graph, &keywords);
+
+        assert!(files.is_empty());
+        assert_eq!(confidence, "low");
+    }
+
+    #[test]
+    fn continue_no_graph() {
+        let result = graph_continue(None, &[], "test query");
+        assert!(result.needs_project);
+    }
+
+    #[test]
+    fn continue_small_project() {
+        let graph = InfoGraph {
+            file_count: 3,
+            ..Default::default()
+        };
+        let result = graph_continue(Some(&graph), &[], "test query");
+        assert!(result.skip);
+    }
+
+    #[test]
+    fn continue_with_memory_hit() {
+        let graph = test_graph();
+        let memories = vec![MemoryEntry {
+            id: "mem:1".to_string(),
+            kind: "fact".to_string(),
+            content: "auth uses JWT tokens for validation".to_string(),
+            tags: vec!["auth".to_string(), "jwt".to_string(), "token".to_string()],
+            files: vec!["src/auth.rs".to_string()],
+            ..Default::default()
+        }];
+
+        let result = graph_continue(Some(&graph), &memories, "JWT token authentication");
+        assert_eq!(result.mode, "memory_hit");
+        assert_eq!(result.confidence, "high");
+        assert!(result.recommended_files.contains(&"src/auth.rs".to_string()));
+        assert!(!result.memories.is_empty());
+    }
+
+    #[test]
+    fn continue_with_retrieval() {
+        let graph = test_graph();
+        let result = graph_continue(Some(&graph), &[], "database connection pool");
+        assert_eq!(result.mode, "retrieve_then_read");
+        assert!(!result.recommended_files.is_empty());
+    }
+
+    #[test]
+    fn confidence_caps() {
+        assert_eq!(caps_for_confidence("high"), (0, 0));
+        assert_eq!(caps_for_confidence("medium"), (2, 2));
+        assert_eq!(caps_for_confidence("low"), (2, 3));
+    }
+
+    #[test]
+    fn impact_finds_connections() {
+        let graph = test_graph();
+        let result = graph_impact(Some(&graph), "src/auth.rs");
+        assert!(result.contains("Direct"));
+        assert!(result.contains("api.rs"));
+        assert!(result.contains("authenticate"));
+    }
+
+    #[test]
+    fn impact_no_graph() {
+        let result = graph_impact(None, "src/auth.rs");
+        assert!(result.contains("No project scanned"));
+    }
+
+    #[test]
+    fn fallback_rg_no_rg_binary() {
+        // This test just verifies the function doesn't panic
+        // It may fail if rg is not installed, which is fine
+        let result = fallback_rg("nonexistent_pattern_xyz", Some("/tmp"), 5);
+        assert!(!result.is_empty());
+    }
+}

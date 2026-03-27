@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# lctx — LeanCTX launcher for Claude Code
+#
+# Usage:
+#   lctx                          # scan current directory, start claude
+#   lctx /path/to/project         # scan given project, start claude
+#   lctx /path/to/project "task"  # scan and start with a prompt
+#   lctx --resume ID              # resume a previous session
+#
+# What it does:
+#   1. Scans the project with tree-sitter (builds .dual-graph/)
+#   2. Registers lean-ctx as an MCP server with Claude Code
+#   3. Sets up SessionStart/PreCompact hooks for context injection
+#   4. Creates CLAUDE.md with dual-graph policy (if missing)
+#   5. Launches Claude Code
+
+set -euo pipefail
+
+# ── Find lean-ctx binary ────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Check multiple locations for the lean-ctx binary
+if [[ -x "$REPO_ROOT/rust/target/release/lean-ctx" ]]; then
+  LEAN_CTX="$REPO_ROOT/rust/target/release/lean-ctx"
+elif command -v lean-ctx &>/dev/null; then
+  LEAN_CTX="$(command -v lean-ctx)"
+elif [[ -x "$REPO_ROOT/rust/target/debug/lean-ctx" ]]; then
+  LEAN_CTX="$REPO_ROOT/rust/target/debug/lean-ctx"
+else
+  echo "lean-ctx binary not found. Building release..."
+  (cd "$REPO_ROOT/rust" && cargo build --release)
+  LEAN_CTX="$REPO_ROOT/rust/target/release/lean-ctx"
+fi
+
+echo "Using: $LEAN_CTX"
+
+# ── Parse arguments ─────────────────────────────────────────────────────────
+PROJECT_DIR=""
+PROMPT=""
+RESUME_ID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --resume|-r)
+      RESUME_ID="$2"
+      shift 2
+      ;;
+    --help|-h)
+      echo "Usage: lctx [project_dir] [prompt]"
+      echo "       lctx --resume ID"
+      echo ""
+      echo "Options:"
+      echo "  --resume, -r ID   Resume a previous Claude Code session"
+      echo "  --help, -h        Show this help"
+      echo ""
+      echo "Examples:"
+      echo "  lctx                              # current directory"
+      echo "  lctx ~/projects/my-app            # specific project"
+      echo "  lctx ~/projects/my-app \"fix auth\" # with initial prompt"
+      echo "  lctx --resume abc123              # resume session"
+      exit 0
+      ;;
+    -*)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+    *)
+      if [[ -z "$PROJECT_DIR" ]]; then
+        PROJECT_DIR="$1"
+      elif [[ -z "$PROMPT" ]]; then
+        PROMPT="$1"
+      else
+        # Everything after second positional arg is part of the prompt
+        PROMPT="$PROMPT $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+# Default to current directory
+if [[ -z "$PROJECT_DIR" ]]; then
+  PROJECT_DIR="$(pwd)"
+fi
+
+# Resolve to absolute path
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+
+if [[ ! -d "$PROJECT_DIR" ]]; then
+  echo "Error: '$PROJECT_DIR' is not a directory"
+  exit 1
+fi
+
+echo "Project: $PROJECT_DIR"
+
+# ── Step 1: Scan project (init --with-graph) ────────────────────────────────
+DG_DIR="$PROJECT_DIR/.dual-graph"
+
+if [[ -d "$DG_DIR" && -f "$DG_DIR/info_graph.json" ]]; then
+  echo "Graph already exists, re-scanning..."
+fi
+
+"$LEAN_CTX" init --with-graph "$PROJECT_DIR"
+echo ""
+
+# ── Step 2: Write prime.sh (SessionStart hook) ──────────────────────────────
+PRIME_SCRIPT="$DG_DIR/prime.sh"
+cat > "$PRIME_SCRIPT" << PRIME_EOF
+#!/usr/bin/env bash
+# LeanCTX SessionStart hook — injects context at session start and compaction
+PROJECT="$PROJECT_DIR"
+
+echo "# Dual-Graph Context"
+echo "Project: \$PROJECT"
+
+# Count files in info_graph
+if [[ -f "\$PROJECT/.dual-graph/info_graph.json" ]] && command -v python3 &>/dev/null; then
+  COUNT=\$(python3 -c "import json; d=json.load(open('\$PROJECT/.dual-graph/info_graph.json')); print(f'Files scanned: {d.get(\"file_count\",0)}')" 2>/dev/null || echo "")
+  if [[ -n "\$COUNT" ]]; then echo "\$COUNT"; fi
+fi
+
+# Inject CONTEXT.md if it exists (session carry-over)
+if [[ -f "\$PROJECT/CONTEXT.md" ]]; then
+  echo ""
+  cat "\$PROJECT/CONTEXT.md"
+fi
+
+# Inject context store entries (decisions, tasks, next steps)
+STORE="\$PROJECT/.dual-graph/context-store.json"
+if [[ -f "\$STORE" ]] && command -v jq &>/dev/null; then
+  CUTOFF=\$(date -v-7d +%Y-%m-%d 2>/dev/null || date -d '7 days ago' +%Y-%m-%d 2>/dev/null || echo "2000-01-01")
+  ENTRIES=\$(jq -r --arg cutoff "\$CUTOFF" \
+    '[.[] | select(.created_at >= \$cutoff)] | .[:15] | .[] | "- " + .kind + ": " + .content' \
+    "\$STORE" 2>/dev/null)
+  if [[ -n "\$ENTRIES" ]]; then
+    echo ""
+    echo "## Memories"
+    echo "\$ENTRIES"
+  fi
+fi
+
+exit 0
+PRIME_EOF
+chmod +x "$PRIME_SCRIPT"
+
+# ── Step 3: Write stop.sh (token tracking hook) ─────────────────────────────
+STOP_SCRIPT="$DG_DIR/stop.sh"
+cat > "$STOP_SCRIPT" << 'STOP_HEREDOC'
+#!/usr/bin/env bash
+# LeanCTX Stop hook — tracks token usage
+INPUT=$(cat)
+TRANSCRIPT=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('transcript_path',''))" 2>/dev/null || echo "")
+if [[ -n "$TRANSCRIPT" && -f "$TRANSCRIPT" ]]; then
+  USAGE=$(python3 - "$TRANSCRIPT" 2>/dev/null << 'PYEOF'
+import json, sys, os
+transcript = sys.argv[1]
+offset_file = transcript + ".stopoffset"
+start_line = 0
+if os.path.exists(offset_file):
+    try: start_line = int(open(offset_file).read().strip())
+    except: start_line = 0
+input_tokens = cache_create = cache_read = output_tokens = 0
+model = ""
+lines = open(transcript).readlines()
+for line in lines[start_line:]:
+    try: msg = json.loads(line)
+    except: continue
+    if msg.get("type") != "assistant": continue
+    m = msg.get("message", {})
+    if not model: model = m.get("model", "")
+    u = m.get("usage", {})
+    if not u: continue
+    input_tokens += u.get("input_tokens", 0)
+    cache_create += u.get("cache_creation_input_tokens", 0)
+    cache_read += u.get("cache_read_input_tokens", 0)
+    output_tokens += u.get("output_tokens", 0)
+try:
+    with open(offset_file, "w") as f: f.write(str(len(lines)))
+except: pass
+if input_tokens > 0 or output_tokens > 0:
+    print(json.dumps({"input_tokens": input_tokens, "output_tokens": output_tokens,
+        "cache_creation_input_tokens": cache_create, "cache_read_input_tokens": cache_read,
+        "model": model or "claude-sonnet-4-6", "description": "auto"}))
+PYEOF
+)
+  if [[ -n "$USAGE" ]]; then
+    # POST to token-counter dashboard if available
+    PORT_FILE="$HOME/.claude/token-counter/dashboard-port.txt"
+    DASH_PORT=8899
+    if [[ -f "$PORT_FILE" ]]; then DASH_PORT=$(cat "$PORT_FILE"); fi
+    curl -sf -X POST "http://localhost:$DASH_PORT/log" \
+      -H "Content-Type: application/json" -d "$USAGE" >/dev/null 2>&1 || true
+  fi
+fi
+exit 0
+STOP_HEREDOC
+chmod +x "$STOP_SCRIPT"
+
+# ── Step 4: Register MCP server with Claude Code ────────────────────────────
+echo "Registering lean-ctx MCP server..."
+
+# Remove existing registration if present, then re-add
+claude mcp remove lean-ctx 2>/dev/null || true
+claude mcp add lean-ctx -- "$LEAN_CTX" 2>/dev/null || true
+
+echo "MCP server registered (stdio transport)"
+
+# ── Step 5: Write .claude/settings.local.json ────────────────────────────────
+CLAUDE_DIR="$PROJECT_DIR/.claude"
+SETTINGS_FILE="$CLAUDE_DIR/settings.local.json"
+
+mkdir -p "$CLAUDE_DIR"
+
+# Build settings JSON with hooks and permissions
+cat > "$SETTINGS_FILE" << SETTINGS_EOF
+{
+  "permissions": {
+    "allow": [
+      "mcp__lean-ctx__graph_continue",
+      "mcp__lean-ctx__graph_read",
+      "mcp__lean-ctx__graph_retrieve",
+      "mcp__lean-ctx__graph_scan",
+      "mcp__lean-ctx__graph_add_memory",
+      "mcp__lean-ctx__graph_register_edit",
+      "mcp__lean-ctx__graph_action_summary",
+      "mcp__lean-ctx__graph_neighbors",
+      "mcp__lean-ctx__graph_impact",
+      "mcp__lean-ctx__fallback_rg"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/bash \"$DG_DIR/prime.sh\""
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/bash \"$DG_DIR/prime.sh\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/bash \"$DG_DIR/stop.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}
+SETTINGS_EOF
+
+echo "Hooks configured in $SETTINGS_FILE"
+
+# ── Step 6: Launch Claude Code ───────────────────────────────────────────────
+echo ""
+echo "Launching Claude Code..."
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+CLAUDE_ARGS=()
+
+if [[ -n "$RESUME_ID" ]]; then
+  CLAUDE_ARGS+=("--resume" "$RESUME_ID")
+elif [[ -n "$PROMPT" ]]; then
+  CLAUDE_ARGS+=("-p" "$PROMPT")
+fi
+
+cd "$PROJECT_DIR"
+exec claude ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}

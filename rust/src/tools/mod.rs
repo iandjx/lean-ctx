@@ -5,6 +5,7 @@ use tokio::sync::RwLock;
 
 use crate::core::cache::SessionCache;
 use crate::core::session::SessionState;
+use crate::graph::GraphState;
 
 pub mod ctx_analyze;
 pub mod ctx_benchmark;
@@ -65,6 +66,7 @@ pub type SharedCache = Arc<RwLock<SessionCache>>;
 pub struct LeanCtxServer {
     pub cache: SharedCache,
     pub session: Arc<RwLock<SessionState>>,
+    pub graph: Arc<RwLock<GraphState>>,
     pub tool_calls: Arc<RwLock<Vec<ToolCallRecord>>>,
     pub call_count: Arc<AtomicUsize>,
     pub checkpoint_interval: usize,
@@ -99,10 +101,12 @@ impl LeanCtxServer {
         let crp_mode = CrpMode::from_env();
 
         let session = SessionState::load_latest().unwrap_or_else(SessionState::new);
+        let graph = GraphState::load_from_cwd();
 
         Self {
             cache: Arc::new(RwLock::new(SessionCache::new())),
             session: Arc::new(RwLock::new(session)),
+            graph: Arc::new(RwLock::new(graph)),
             tool_calls: Arc::new(RwLock::new(Vec::new())),
             call_count: Arc::new(AtomicUsize::new(0)),
             checkpoint_interval: interval,

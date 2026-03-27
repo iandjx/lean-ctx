@@ -85,6 +85,10 @@ pub struct SessionStats {
     pub files_read: u32,
     pub commands_run: u32,
     pub unsaved_changes: u32,
+    #[serde(default)]
+    pub graph_reads: u32,
+    #[serde(default)]
+    pub graph_memory_entries: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

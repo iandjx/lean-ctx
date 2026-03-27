@@ -350,6 +350,177 @@ impl ServerHandler for LeanCtxServer {
                             }
                         }),
                     ),
+                    // ── Dual-Graph Tools ────────────────────────────
+                    tool_def(
+                        "graph_read",
+                        "Read a file or symbol with LeanCTX compression. Supports file::symbol notation \
+                        (e.g. 'src/auth.ts::handleLogin') to read only specific functions. \
+                        Full files are compressed via map mode; symbols return just the relevant lines. \
+                        Results are cached for future delta/cache hits.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "file": {
+                                    "type": "string",
+                                    "description": "File path, or file::symbol for symbol-level read"
+                                }
+                            },
+                            "required": ["file"]
+                        }),
+                    ),
+                    tool_def(
+                        "graph_neighbors",
+                        "Show all files connected to a given file via import/export/call/reference edges \
+                        in the project graph. Useful for understanding dependencies before making changes.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "file": {
+                                    "type": "string",
+                                    "description": "File path to find neighbors for"
+                                }
+                            },
+                            "required": ["file"]
+                        }),
+                    ),
+                    tool_def(
+                        "graph_add_memory",
+                        "Store a persistent memory entry (decision, task, fact, blocker, or next step). \
+                        Entries are max 15 words, tagged with topics and related files. \
+                        Persisted across sessions in .dual-graph/context-store.json.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "enum": ["decision", "task", "next", "fact", "blocker"],
+                                    "description": "Kind of memory entry"
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "One sentence, max 15 words"
+                                },
+                                "tags": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Topic tags for retrieval"
+                                },
+                                "files": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Related file paths"
+                                }
+                            },
+                            "required": ["type", "content"]
+                        }),
+                    ),
+                    tool_def(
+                        "graph_register_edit",
+                        "Record that files were edited so the graph can prioritize them in future \
+                        retrievals. Accepts file::symbol notation. Call after making changes.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "files": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Files that were edited (supports file::symbol notation)"
+                                }
+                            },
+                            "required": ["files"]
+                        }),
+                    ),
+                    tool_def(
+                        "graph_action_summary",
+                        "Show a summary of session actions: queries made, files read, files edited, \
+                        and total operations. Useful for understanding what context has been explored.",
+                        json!({
+                            "type": "object",
+                            "properties": {}
+                        }),
+                    ),
+                    tool_def(
+                        "graph_continue",
+                        "CALL FIRST on every turn before any file reads. Searches action-memory, \
+                        then retrieves relevant files from the project graph. Returns recommended_files, \
+                        confidence level, and exploration caps. If needs_project=true, call graph_scan.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "The user's current request or question"
+                                }
+                            },
+                            "required": ["query"]
+                        }),
+                    ),
+                    tool_def(
+                        "graph_retrieve",
+                        "Keyword-matched retrieval from the project graph. Scores nodes by keyword \
+                        overlap and returns ranked files with confidence. Normally called via graph_continue.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Search query"
+                                }
+                            },
+                            "required": ["query"]
+                        }),
+                    ),
+                    tool_def(
+                        "graph_scan",
+                        "Scan a project directory and build the semantic graph (files, symbols, edges). \
+                        Uses tree-sitter for 14 languages. Creates .dual-graph/info_graph.json and \
+                        .dual-graph/symbol_index.json. Call when graph_continue returns needs_project=true.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "project_root": {
+                                    "type": "string",
+                                    "description": "Absolute path to project root directory"
+                                }
+                            },
+                            "required": ["project_root"]
+                        }),
+                    ),
+                    tool_def(
+                        "graph_impact",
+                        "Show what depends on a file — direct and indirect connections up to 2 levels deep. \
+                        Useful before making changes to understand blast radius.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "file": {
+                                    "type": "string",
+                                    "description": "File path to analyze impact for"
+                                }
+                            },
+                            "required": ["file"]
+                        }),
+                    ),
+                    tool_def(
+                        "fallback_rg",
+                        "Controlled ripgrep search with hard caps. Use only when graph_continue \
+                        confidence is medium or low and you need supplementary context. \
+                        Respects max_supplementary_greps cap.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "pattern": {
+                                    "type": "string",
+                                    "description": "Regex pattern to search for"
+                                },
+                                "max_hits": {
+                                    "type": "integer",
+                                    "description": "Max results (default: 30)"
+                                }
+                            },
+                            "required": ["pattern"]
+                        }),
+                    ),
                 ],
                 ..Default::default()
             })
@@ -384,6 +555,11 @@ impl ServerHandler for LeanCtxServer {
                 {
                     let mut session = self.session.write().await;
                     session.touch_file(&path, file_ref.as_deref(), &mode, original);
+                }
+                // Record in action graph for graph-aware retrieval
+                {
+                    let mut graph = self.graph.write().await;
+                    graph.record_read(&path, None);
                 }
                 self.record_call(
                     "ctx_read",
@@ -679,6 +855,146 @@ impl ServerHandler for LeanCtxServer {
                 self.record_call("ctx_wrapped", 0, 0, Some(period)).await;
                 result
             }
+            // ── Dual-Graph Tool Handlers ────────────────────────
+            "graph_read" => {
+                let file = get_str(args, "file")
+                    .ok_or_else(|| ErrorData::invalid_params("file is required", None))?;
+                let mut cache = self.cache.write().await;
+                let graph = self.graph.read().await;
+                let output = crate::graph::read::handle(
+                    &mut cache,
+                    &graph.symbol_index,
+                    &file,
+                    graph.project_root.as_deref(),
+                    self.crp_mode,
+                );
+                let original = cache.get(&file).map_or(0, |e| e.original_tokens);
+                let tokens = crate::core::tokens::count_tokens(&output);
+                drop(cache);
+                drop(graph);
+                // Track in session stats + action graph
+                {
+                    let mut session = self.session.write().await;
+                    session.stats.graph_reads += 1;
+                }
+                {
+                    let mut graph = self.graph.write().await;
+                    graph.record_read(&file, None);
+                }
+                self.record_call(
+                    "graph_read",
+                    original,
+                    original.saturating_sub(tokens),
+                    Some("graph".to_string()),
+                )
+                .await;
+                output
+            }
+            "graph_neighbors" => {
+                let file = get_str(args, "file")
+                    .ok_or_else(|| ErrorData::invalid_params("file is required", None))?;
+                let graph = self.graph.read().await;
+                crate::graph::neighbors::handle(graph.info_graph.as_ref(), &file)
+            }
+            "graph_add_memory" => {
+                let kind = get_str(args, "type")
+                    .ok_or_else(|| ErrorData::invalid_params("type is required", None))?;
+                let content = get_str(args, "content")
+                    .ok_or_else(|| ErrorData::invalid_params("content is required", None))?;
+                let tags = get_str_array(args, "tags").unwrap_or_default();
+                let files = get_str_array(args, "files").unwrap_or_default();
+                let mut graph = self.graph.write().await;
+                let result =
+                    crate::graph::memory::handle(&mut graph.context_store, &kind, &content, tags, files);
+                let _ = graph.save_context_store();
+                drop(graph);
+                {
+                    let mut session = self.session.write().await;
+                    session.stats.graph_memory_entries += 1;
+                }
+                result
+            }
+            "graph_register_edit" => {
+                let files = get_str_array(args, "files")
+                    .ok_or_else(|| ErrorData::invalid_params("files array is required", None))?;
+                let mut graph = self.graph.write().await;
+                let result = crate::graph::edit::handle(&mut graph.action_graph, &files);
+                let _ = graph.save_action_graph();
+                result
+            }
+            "graph_action_summary" => {
+                let graph = self.graph.read().await;
+                crate::graph::summary::handle(&graph.action_graph)
+            }
+            "graph_continue" => {
+                let query = get_str(args, "query")
+                    .ok_or_else(|| ErrorData::invalid_params("query is required", None))?;
+                let graph = self.graph.read().await;
+                let result = crate::graph::retrieval::graph_continue(
+                    graph.info_graph.as_ref(),
+                    &graph.context_store,
+                    &query,
+                );
+                result.to_json()
+            }
+            "graph_retrieve" => {
+                let query = get_str(args, "query")
+                    .ok_or_else(|| ErrorData::invalid_params("query is required", None))?;
+                let graph = self.graph.read().await;
+                let keywords = crate::graph::retrieval::extract_keywords(&query);
+                match graph.info_graph.as_ref() {
+                    Some(ig) => {
+                        let (files, confidence) =
+                            crate::graph::retrieval::graph_retrieve(ig, &keywords);
+                        format!(
+                            r#"{{"ok":true,"files":{},"confidence":"{}"}}"#,
+                            serde_json::to_string(&files).unwrap_or_else(|_| "[]".to_string()),
+                            confidence,
+                        )
+                    }
+                    None => r#"{"ok":false,"error":"No project scanned. Call graph_scan first."}"#
+                        .to_string(),
+                }
+            }
+            "graph_scan" => {
+                let project_root = get_str(args, "project_root")
+                    .ok_or_else(|| ErrorData::invalid_params("project_root is required", None))?;
+                let (info_graph, symbol_index) = crate::graph::scanner::scan(&project_root);
+                let file_count = info_graph.file_count;
+                let symbol_count = info_graph.symbol_count;
+                let edge_count = info_graph.edge_count;
+
+                let mut graph = self.graph.write().await;
+                graph.project_root = Some(project_root.clone());
+                graph.info_graph = Some(info_graph);
+                graph.symbol_index = symbol_index;
+
+                // Set up .dual-graph directory and save
+                let dg_dir = std::path::Path::new(&project_root).join(".dual-graph");
+                graph.dual_graph_dir = Some(dg_dir);
+                let _ = graph.save_info_graph();
+
+                format!(
+                    "Project scanned: {file_count} files, {symbol_count} symbols, {edge_count} edges"
+                )
+            }
+            "graph_impact" => {
+                let file = get_str(args, "file")
+                    .ok_or_else(|| ErrorData::invalid_params("file is required", None))?;
+                let graph = self.graph.read().await;
+                crate::graph::retrieval::graph_impact(graph.info_graph.as_ref(), &file)
+            }
+            "fallback_rg" => {
+                let pattern = get_str(args, "pattern")
+                    .ok_or_else(|| ErrorData::invalid_params("pattern is required", None))?;
+                let max_hits = get_int(args, "max_hits").unwrap_or(30) as usize;
+                let graph = self.graph.read().await;
+                crate::graph::retrieval::fallback_rg(
+                    &pattern,
+                    graph.project_root.as_deref(),
+                    max_hits,
+                )
+            }
             _ => {
                 return Err(ErrorData::invalid_params(
                     format!("Unknown tool: {name}"),
@@ -698,6 +1014,14 @@ impl ServerHandler for LeanCtxServer {
                 | "ctx_dedup"
                 | "ctx_session"
                 | "ctx_wrapped"
+                | "graph_neighbors"
+                | "graph_add_memory"
+                | "graph_register_edit"
+                | "graph_action_summary"
+                | "graph_continue"
+                | "graph_retrieve"
+                | "graph_impact"
+                | "fallback_rg"
         );
 
         if !skip_checkpoint && self.increment_and_check() {
@@ -767,7 +1091,18 @@ Session state is auto-saved before cache clear. Configurable via LEAN_CTX_CACHE_
 \n\
 Write, StrReplace, Delete, Glob have no lean-ctx equivalent — use normally.\n\
 \n\
-REMINDER: NEVER use Read, Shell, or Grep directly. ALWAYS use ctx_read, ctx_shell, ctx_search instead.");
+REMINDER: NEVER use Read, Shell, or Grep directly. ALWAYS use ctx_read, ctx_shell, ctx_search instead.\n\
+\n\
+DUAL-GRAPH (if .dual-graph/ exists):\n\
+• graph_continue(query) — CALL FIRST every turn before any file reads\n\
+• graph_read(file) — read file/symbol with compression (supports file::symbol notation)\n\
+• graph_scan(project_root) — scan project to build graph (when needs_project=true)\n\
+• graph_neighbors(file) — show connected files\n\
+• graph_add_memory(type, content, tags, files) — persist decisions/facts across sessions\n\
+• graph_register_edit(files) — record edits for future retrieval\n\
+• fallback_rg(pattern) — controlled grep (respect confidence caps)\n\
+• graph_impact(file) — show dependency blast radius\n\
+If graph_continue returns confidence=high, stop exploring. Respect max_supplementary_greps/files caps.");
 
     match crp_mode {
         CrpMode::Off => base,

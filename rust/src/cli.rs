@@ -601,12 +601,18 @@ pub fn cmd_tee(args: &[String]) {
 
 pub fn cmd_init(args: &[String]) {
     let global = args.iter().any(|a| a == "--global" || a == "-g");
+    let with_graph = args.iter().any(|a| a == "--with-graph");
 
     let agent = args
         .iter()
         .position(|a| a == "--agent")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str());
+
+    if with_graph {
+        init_graph(args);
+        return;
+    }
 
     if let Some(agent_name) = agent {
         crate::hooks::install_agent_hook(agent_name);
@@ -886,3 +892,139 @@ fn print_savings(original: usize, sent: usize) {
         println!("[{saved} tok saved ({pct}%)]");
     }
 }
+
+fn init_graph(args: &[String]) {
+    // Determine project root: explicit arg or cwd
+    let project_root = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .last()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| ".".to_string())
+        });
+
+    let root_path = std::path::Path::new(&project_root);
+    if !root_path.exists() {
+        eprintln!("Error: directory '{}' does not exist", project_root);
+        std::process::exit(1);
+    }
+
+    let dg_dir = root_path.join(".dual-graph");
+
+    // 1. Create .dual-graph directory
+    println!("Creating .dual-graph/ directory...");
+    if let Err(e) = std::fs::create_dir_all(&dg_dir) {
+        eprintln!("Error creating .dual-graph/: {e}");
+        std::process::exit(1);
+    }
+
+    // 2. Run graph_scan
+    println!("Scanning project with tree-sitter...");
+    let (info_graph, symbol_index) = crate::graph::scanner::scan(&project_root);
+    println!(
+        "  {} files, {} symbols, {} edges",
+        info_graph.file_count, info_graph.symbol_count, info_graph.edge_count
+    );
+
+    // Save graph files
+    let state = crate::graph::GraphState {
+        dual_graph_dir: Some(dg_dir.clone()),
+        project_root: Some(project_root.clone()),
+        info_graph: Some(info_graph),
+        symbol_index,
+        ..Default::default()
+    };
+    if let Err(e) = state.save_info_graph() {
+        eprintln!("Error saving info_graph.json: {e}");
+    }
+    if let Err(e) = state.save_context_store() {
+        eprintln!("Error saving context-store.json: {e}");
+    }
+    if let Err(e) = state.save_action_graph() {
+        eprintln!("Error saving chat_action_graph.json: {e}");
+    }
+
+    // 3. Add .dual-graph/ to .gitignore
+    let gitignore_path = root_path.join(".gitignore");
+    let needs_entry = if gitignore_path.exists() {
+        let content = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
+        !content.lines().any(|l| l.trim() == ".dual-graph" || l.trim() == ".dual-graph/")
+    } else {
+        true
+    };
+    if needs_entry {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&gitignore_path)
+        {
+            let _ = writeln!(f, "\n# Dual-graph context data\n.dual-graph/");
+            println!("Added .dual-graph/ to .gitignore");
+        }
+    }
+
+    // 4. Write CLAUDE.md if it doesn't exist
+    let claude_md = root_path.join("CLAUDE.md");
+    if !claude_md.exists() {
+        let policy = GRAPH_CLAUDE_MD;
+        if let Err(e) = std::fs::write(&claude_md, policy) {
+            eprintln!("Error writing CLAUDE.md: {e}");
+        } else {
+            println!("Created CLAUDE.md with dual-graph context policy");
+        }
+    } else {
+        println!("CLAUDE.md already exists (not overwritten)");
+    }
+
+    println!("\nlean-ctx init --with-graph complete.");
+    println!("  Graph data: {}", dg_dir.display());
+    println!("  The MCP server will auto-load .dual-graph/ on startup.");
+    println!("\nUsage: the LLM should call graph_continue first on each turn,");
+    println!("then graph_read for recommended files (with compression).");
+}
+
+const GRAPH_CLAUDE_MD: &str = r#"# Dual-Graph Context Policy
+
+This project uses lean-ctx with dual-graph for efficient context retrieval + compression.
+
+## MANDATORY: Always follow this order
+
+1. **Call `graph_continue` first** — before any file exploration, grep, or code reading.
+
+2. **If `graph_continue` returns `needs_project=true`**: call `graph_scan` with the
+   current project directory. Do NOT ask the user.
+
+3. **If `graph_continue` returns `skip=true`**: project has fewer than 5 files.
+   Do NOT do broad or recursive exploration. Read only specific files if their names
+   are mentioned, or ask the user what to work on.
+
+4. **Read `recommended_files`** using `graph_read` — **one call per file**.
+   - `graph_read` accepts a single `file` parameter (string).
+   - `recommended_files` may contain `file::symbol` entries (e.g. `src/auth.ts::handleLogin`).
+     Pass them verbatim — it reads only that symbol's lines, not the full file.
+
+5. **Check `confidence` and obey the caps strictly:**
+   - `confidence=high` → Stop. Do NOT grep or explore further.
+   - `confidence=medium` → call `fallback_rg` at most `max_supplementary_greps` times,
+     then `graph_read` at most `max_supplementary_files` additional files. Then stop.
+   - `confidence=low` → same caps as medium but slightly more files allowed.
+
+## Rules
+
+- Do NOT use `rg`, `grep`, or bash file exploration before calling `graph_continue`.
+- Do NOT do broad/recursive exploration at any confidence level.
+- `max_supplementary_greps` and `max_supplementary_files` are hard caps — never exceed them.
+- After edits, call `graph_register_edit` with the changed files.
+
+## Context Store
+
+Call `graph_add_memory` for decisions, tasks, next steps, facts, or blockers:
+```
+graph_add_memory(type="decision", content="max 15 words", tags=["topic"], files=["file.rs"])
+```
+"#;
+

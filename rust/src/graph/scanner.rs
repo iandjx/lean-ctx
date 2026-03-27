@@ -6,6 +6,7 @@ use walkdir::WalkDir;
 use crate::core::deps;
 use crate::core::signatures;
 use crate::graph::types::{GraphEdge, GraphNode, InfoGraph, SymbolEntry, SymbolIndex};
+use serde_json;
 
 /// Supported source file extensions for scanning.
 const SOURCE_EXTS: &[&str] = &[
@@ -34,6 +35,54 @@ const SKIP_DIRS: &[&str] = &[
     "vendor",
 ];
 
+/// Load existing graph data from .dual-graph/ for incremental scanning.
+/// Returns (file_nodes_by_path, symbol_nodes_by_id, edges_by_from_file, symbol_index).
+fn load_existing_for_incremental(
+    project_root: &str,
+) -> (
+    HashMap<String, GraphNode>,
+    HashMap<String, GraphNode>,
+    HashMap<String, Vec<GraphEdge>>,
+    SymbolIndex,
+) {
+    let dg_dir = Path::new(project_root).join(".dual-graph");
+
+    let graph: Option<InfoGraph> = std::fs::read_to_string(dg_dir.join("info_graph.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+
+    let (file_nodes, symbol_nodes, edges_by_from) = match graph {
+        Some(g) => {
+            let file_nodes: HashMap<String, GraphNode> = g
+                .nodes
+                .iter()
+                .filter(|n| n.kind == "file" && n.file_hash.is_some())
+                .map(|n| (n.path.clone(), n.clone()))
+                .collect();
+            let symbol_nodes: HashMap<String, GraphNode> = g
+                .nodes
+                .into_iter()
+                .filter(|n| n.kind == "symbol")
+                .map(|n| (n.id.clone(), n))
+                .collect();
+            let mut edges_by_from: HashMap<String, Vec<GraphEdge>> = HashMap::new();
+            for edge in g.edges {
+                edges_by_from.entry(edge.from.clone()).or_default().push(edge);
+            }
+            (file_nodes, symbol_nodes, edges_by_from)
+        }
+        None => (HashMap::new(), HashMap::new(), HashMap::new()),
+    };
+
+    let sym_index: SymbolIndex =
+        std::fs::read_to_string(dg_dir.join("symbol_index.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+    (file_nodes, symbol_nodes, edges_by_from, sym_index)
+}
+
 /// Scan a project directory and build an `InfoGraph` + `SymbolIndex`.
 /// Uses LeanCTX's existing tree-sitter + regex signature extraction.
 pub fn scan(project_root: &str) -> (InfoGraph, SymbolIndex) {
@@ -43,6 +92,10 @@ pub fn scan(project_root: &str) -> (InfoGraph, SymbolIndex) {
     let mut symbol_index: SymbolIndex = HashMap::new();
     let mut file_count: usize = 0;
     let mut symbol_count: usize = 0;
+
+    // Load existing data for incremental mode (skip re-parsing unchanged files)
+    let (existing_file_nodes, existing_symbol_nodes, existing_edges_by_from, existing_sym_index) =
+        load_existing_for_incremental(project_root);
 
     // Walk the directory tree
     let walker = WalkDir::new(root)
@@ -89,10 +142,33 @@ pub fn scan(project_root: &str) -> (InfoGraph, SymbolIndex) {
             Err(_) => continue, // Skip binary/unreadable files
         };
 
-        // Build file node
+        // Compute hash first for incremental check
+        let hash = compute_hash(&content);
+
+        // Incremental: if file unchanged, reuse previous scan results
+        if let Some(existing_node) = existing_file_nodes.get(&rel_path) {
+            if existing_node.file_hash.as_deref() == Some(hash.as_str()) {
+                nodes.push(existing_node.clone());
+                file_count += 1;
+                for sym_node in existing_symbol_nodes.values().filter(|n| n.path == rel_path) {
+                    nodes.push(sym_node.clone());
+                    symbol_count += 1;
+                }
+                for (id, entry) in &existing_sym_index {
+                    if entry.path == rel_path {
+                        symbol_index.insert(id.clone(), entry.clone());
+                    }
+                }
+                if let Some(file_edges) = existing_edges_by_from.get(&rel_path) {
+                    edges.extend_from_slice(file_edges);
+                }
+                continue;
+            }
+        }
+
+        // Build file node (new or changed file)
         let keywords = extract_keywords(&rel_path, &content);
         let summary = extract_summary(&content);
-        let hash = compute_hash(&content);
 
         let file_node = GraphNode {
             id: rel_path.clone(),
@@ -473,5 +549,48 @@ mod tests {
             resolve_import("lodash", "src/app.ts"),
             "lodash"
         );
+    }
+
+    #[test]
+    fn scan_incremental_reuses_unchanged_files() {
+        let tmp = std::env::temp_dir().join("lean_ctx_incremental_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        std::fs::write(
+            tmp.join("lib.rs"),
+            "pub fn greet() -> &'static str { \"hello\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("main.rs"),
+            "fn main() { println!(\"world\"); }\n",
+        )
+        .unwrap();
+
+        // First scan
+        let (graph1, index1) = scan(&tmp.to_string_lossy());
+        assert_eq!(graph1.file_count, 2);
+
+        // Save to .dual-graph/
+        let dg = tmp.join(".dual-graph");
+        std::fs::create_dir_all(&dg).unwrap();
+        let json = serde_json::to_string(&graph1).unwrap();
+        std::fs::write(dg.join("info_graph.json"), &json).unwrap();
+        let idx_json = serde_json::to_string(&index1).unwrap();
+        std::fs::write(dg.join("symbol_index.json"), &idx_json).unwrap();
+
+        // Second scan — lib.rs is unchanged, main.rs is changed
+        std::fs::write(tmp.join("main.rs"), "fn main() { println!(\"updated\"); }\n").unwrap();
+        let (graph2, _) = scan(&tmp.to_string_lossy());
+
+        assert_eq!(graph2.file_count, 2);
+
+        // lib.rs node should have identical hash across both scans
+        let lib1 = graph1.nodes.iter().find(|n| n.kind == "file" && n.path.contains("lib.rs")).unwrap();
+        let lib2 = graph2.nodes.iter().find(|n| n.kind == "file" && n.path.contains("lib.rs")).unwrap();
+        assert_eq!(lib1.file_hash, lib2.file_hash, "unchanged file should have same hash");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

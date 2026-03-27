@@ -232,6 +232,11 @@ pub fn scan(project_root: &str) -> (InfoGraph, SymbolIndex) {
             );
         }
 
+        // Extract call edges between symbols
+        let sym_names: Vec<String> = sigs.iter().map(|s| s.name.clone()).collect();
+        let call_edges = extract_call_edges(&content, &rel_path, &sym_names);
+        edges.extend(call_edges);
+
         // Extract deps and build edges
         let dep_info = deps::extract_deps(&content, ext);
 
@@ -411,6 +416,79 @@ fn resolve_import(import: &str, from_file: &str) -> String {
     import.to_string()
 }
 
+/// Extract function call edges from a file's content.
+/// Returns a list of (caller_symbol_id, callee_name) pairs.
+/// Uses simple pattern matching — not a full AST walk.
+fn extract_call_edges(
+    content: &str,
+    file_path: &str,
+    symbol_names: &[String],
+) -> Vec<GraphEdge> {
+    let mut call_edges = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+
+    for sym_name in symbol_names {
+        // Find the symbol's line range by scanning for its definition
+        let start_idx = lines.iter().position(|l| {
+            l.contains(sym_name.as_str())
+                && (l.contains("fn ")
+                    || l.contains("def ")
+                    || l.contains("function ")
+                    || l.contains("class "))
+        });
+
+        let Some(start) = start_idx else { continue };
+
+        // Collect the body lines (until next same-level definition)
+        let body: String = lines[start..]
+            .iter()
+            .take(100) // cap body scan at 100 lines
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Find call patterns: word followed by `(`
+        let call_re = regex_call_pattern(&body);
+        for callee in call_re {
+            // Avoid self-references and noise
+            if callee == *sym_name || callee.len() < 2 {
+                continue;
+            }
+            call_edges.push(GraphEdge {
+                from: format!("{file_path}::{sym_name}"),
+                to: callee,
+                rel: "calls".to_string(),
+            });
+        }
+    }
+
+    call_edges
+}
+
+/// Extract identifiers followed by `(` from a code snippet (simple call detection).
+fn regex_call_pattern(body: &str) -> Vec<String> {
+    let mut calls = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for word in body.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        let w = word.trim();
+        if w.len() < 2 || is_stop_word(w) {
+            continue;
+        }
+        // Check if followed by `(` in the body (simple heuristic)
+        if let Some(pos) = body.find(w) {
+            let after = &body[pos + w.len()..];
+            let next_non_ws = after.trim_start().chars().next();
+            if next_non_ws == Some('(') && !seen.contains(w) {
+                seen.insert(w.to_string());
+                calls.push(w.to_string());
+            }
+        }
+    }
+
+    calls
+}
+
 /// Check if a word is a common stop word (not useful as a keyword).
 fn is_stop_word(word: &str) -> bool {
     matches!(
@@ -549,6 +627,17 @@ mod tests {
             resolve_import("lodash", "src/app.ts"),
             "lodash"
         );
+    }
+
+    #[test]
+    fn scan_extracts_call_edges() {
+        let content = "fn foo() { bar(); baz(); }\nfn bar() {}\nfn baz() {}\n";
+        let sym_names = vec!["foo".to_string(), "bar".to_string(), "baz".to_string()];
+        let edges = extract_call_edges(content, "src/lib.rs", &sym_names);
+        // foo should call bar and baz
+        let from_foo: Vec<_> = edges.iter().filter(|e| e.from.contains("foo")).collect();
+        assert!(!from_foo.is_empty(), "foo should have outgoing call edges");
+        assert!(from_foo.iter().any(|e| e.to == "bar" || e.to == "baz"));
     }
 
     #[test]

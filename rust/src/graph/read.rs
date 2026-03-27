@@ -36,7 +36,7 @@ pub fn handle(
         read_symbol_lines(cache, &abs_path, file, start, end, crp_mode)
     } else {
         // Full file read: delegate to ctx_read with auto-selected mode
-        let mode = read_mode_from_env();
+        let mode = adaptive_read_mode(&abs_path);
         crate::tools::ctx_read::handle(cache, &abs_path, &mode, crp_mode)
     }
 }
@@ -148,9 +148,23 @@ fn resolve_path(file_path: &str, project_root: Option<&str>) -> String {
     file_path.to_string()
 }
 
-/// Get the default read mode for graph_read from env, defaulting to "map".
-fn read_mode_from_env() -> String {
-    std::env::var("DG_DEFAULT_READ_MODE").unwrap_or_else(|_| "map".to_string())
+/// Select read mode adaptively based on file size on disk.
+/// Falls back to env var DG_DEFAULT_READ_MODE if set.
+fn adaptive_read_mode(abs_path: &str) -> String {
+    // Env override takes priority
+    if let Ok(mode) = std::env::var("DG_DEFAULT_READ_MODE") {
+        return mode;
+    }
+    // Use file size as a proxy for token count (~4 bytes per token)
+    let bytes = std::fs::metadata(abs_path).map(|m| m.len()).unwrap_or(0);
+    let approx_tokens = bytes / 4;
+    if approx_tokens < 300 {
+        "full".to_string()
+    } else if approx_tokens > 3000 {
+        "aggressive".to_string()
+    } else {
+        "map".to_string()
+    }
 }
 
 #[cfg(test)]
@@ -180,9 +194,33 @@ mod tests {
     }
 
     #[test]
-    fn read_mode_default_is_map() {
+    fn adaptive_mode_selects_full_for_tiny_file() {
+        let tmp = std::env::temp_dir().join("lean_ctx_tiny_file.rs");
+        std::fs::write(&tmp, "fn x() {}\n").unwrap();
         std::env::remove_var("DG_DEFAULT_READ_MODE");
-        assert_eq!(read_mode_from_env(), "map");
+        assert_eq!(adaptive_read_mode(&tmp.to_string_lossy()), "full");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn adaptive_mode_selects_aggressive_for_large_file() {
+        let tmp = std::env::temp_dir().join("lean_ctx_large_file.rs");
+        // Write ~15KB of content (> 3000 tokens approx)
+        let big: String = "fn placeholder() { let x = 1; }\n".repeat(500);
+        std::fs::write(&tmp, &big).unwrap();
+        std::env::remove_var("DG_DEFAULT_READ_MODE");
+        assert_eq!(adaptive_read_mode(&tmp.to_string_lossy()), "aggressive");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn adaptive_mode_env_override() {
+        let tmp = std::env::temp_dir().join("lean_ctx_override_file.rs");
+        std::fs::write(&tmp, "fn x() {}\n").unwrap();
+        std::env::set_var("DG_DEFAULT_READ_MODE", "signatures");
+        assert_eq!(adaptive_read_mode(&tmp.to_string_lossy()), "signatures");
+        std::env::remove_var("DG_DEFAULT_READ_MODE");
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]

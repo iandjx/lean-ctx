@@ -258,6 +258,29 @@ pub fn graph_retrieve(
     (recommended, confidence)
 }
 
+/// Compute an age-based decay factor for a memory entry.
+/// Entries < 7 days old: factor=1.0. Older: decays toward 0.5 at 90 days.
+fn memory_decay_factor(created_epoch_ms: Option<u64>) -> f64 {
+    let Some(epoch_ms) = created_epoch_ms else {
+        return 1.0; // No timestamp → no decay
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let age_days = now_ms.saturating_sub(epoch_ms) / (1000 * 60 * 60 * 24);
+
+    if age_days < 7 {
+        1.0
+    } else if age_days > 90 {
+        0.5
+    } else {
+        // Linear decay from 1.0 at 7 days to 0.5 at 90 days
+        1.0 - 0.5 * (age_days - 7) as f64 / 83.0
+    }
+}
+
 /// Search memories for entries matching the query keywords.
 fn search_memories(store: &[MemoryEntry], query_keywords: &[String]) -> Vec<MemoryEntry> {
     let mut matches: Vec<(usize, &MemoryEntry)> = Vec::new();
@@ -278,7 +301,11 @@ fn search_memories(store: &[MemoryEntry], query_keywords: &[String]) -> Vec<Memo
         }
 
         if overlap >= 2 {
-            matches.push((overlap, entry));
+            let decay = memory_decay_factor(entry.created_epoch);
+            let adjusted = ((overlap as f64) * decay) as usize;
+            if adjusted >= 1 {
+                matches.push((adjusted, entry));
+            }
         }
     }
 
@@ -650,6 +677,42 @@ mod tests {
     fn impact_no_graph() {
         let result = graph_impact(None, "src/auth.rs");
         assert!(result.contains("No project scanned"));
+    }
+
+    #[test]
+    fn memory_decay_fresh_entry_has_factor_one() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        assert_eq!(memory_decay_factor(Some(now_ms)), 1.0);
+    }
+
+    #[test]
+    fn memory_decay_old_entry_has_lower_factor() {
+        // 100 days ago
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let old_ms = now_ms - (100 * 24 * 60 * 60 * 1000);
+        let factor = memory_decay_factor(Some(old_ms));
+        assert!(factor <= 0.5, "100-day-old entry should have factor <= 0.5, got {factor}");
+    }
+
+    #[test]
+    fn memory_decay_no_timestamp_returns_one() {
+        assert_eq!(memory_decay_factor(None), 1.0);
+    }
+
+    #[test]
+    fn memory_decay_seven_days_old_has_factor_one() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let seven_days_ago = now_ms - (7 * 24 * 60 * 60 * 1000);
+        assert_eq!(memory_decay_factor(Some(seven_days_ago)), 1.0);
     }
 
     #[test]

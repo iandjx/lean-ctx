@@ -246,21 +246,20 @@ mod tests {
 
     #[test]
     fn adaptive_mode_env_override() {
-        // Note: this test manipulates env vars; run in isolation via --test-threads=1
-        // if flaky in CI. The logic being tested is: env var takes priority over size.
+        // Use a drop guard to ensure the env var is always cleaned up,
+        // even if another test thread races or this test panics.
+        struct EnvGuard(&'static str);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _guard = EnvGuard("DG_DEFAULT_READ_MODE");
+
         let tmp = std::env::temp_dir().join("lean_ctx_override_file_unique_123.rs");
         std::fs::write(&tmp, "fn x() {}\n").unwrap();
-        // The env override path is already covered by the function implementation.
-        // We test it by temporarily setting and then immediately restoring.
-        let result = {
-            std::env::set_var("DG_DEFAULT_READ_MODE", "signatures");
-            let r = adaptive_read_mode(&tmp.to_string_lossy());
-            std::env::remove_var("DG_DEFAULT_READ_MODE");
-            r
-        };
-        // Result should be "signatures" if env was set when called, but may be
-        // anything if another thread removed the var concurrently. Just verify no panic.
-        assert!(!result.is_empty());
+        std::env::set_var("DG_DEFAULT_READ_MODE", "signatures");
+        assert_eq!(adaptive_read_mode(&tmp.to_string_lossy()), "signatures");
         let _ = std::fs::remove_file(&tmp);
     }
 

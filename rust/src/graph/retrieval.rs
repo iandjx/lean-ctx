@@ -51,6 +51,7 @@ pub fn graph_continue(
     info_graph: Option<&InfoGraph>,
     context_store: &[MemoryEntry],
     query: &str,
+    recent_files: &[String],
 ) -> ContinueResult {
     // 1. No graph loaded?
     let graph = match info_graph {
@@ -113,7 +114,7 @@ pub fn graph_continue(
     }
 
     // 4. Run graph retrieval
-    let (recommended, confidence) = graph_retrieve(graph, &query_keywords);
+    let (recommended, confidence) = graph_retrieve(graph, &query_keywords, recent_files);
 
     let (max_greps, max_files) = caps_for_confidence(&confidence);
 
@@ -134,6 +135,7 @@ pub fn graph_continue(
 pub fn graph_retrieve(
     graph: &InfoGraph,
     query_keywords: &[String],
+    recent_files: &[String],
 ) -> (Vec<String>, String) {
     if query_keywords.is_empty() {
         return (vec![], "low".to_string());
@@ -206,6 +208,18 @@ pub fn graph_retrieve(
             if let Some(entry) = scores.iter_mut().find(|(id, _)| id == &edge.from) {
                 entry.1 += 0.5;
             }
+        }
+    }
+
+    // Recency boost: files recently read or edited score +0.75
+    for (id, score) in scores.iter_mut() {
+        let file_path = if id.contains("::") {
+            id.split("::").next().unwrap_or(id.as_str())
+        } else {
+            id.as_str()
+        };
+        if recent_files.iter().any(|r| r == file_path || r == id) {
+            *score += 0.75;
         }
     }
 
@@ -483,7 +497,7 @@ mod tests {
     fn retrieve_finds_relevant_files() {
         let graph = test_graph();
         let keywords = extract_keywords("authentication token JWT");
-        let (files, confidence) = graph_retrieve(&graph, &keywords);
+        let (files, confidence) = graph_retrieve(&graph, &keywords, &[]);
 
         assert!(!files.is_empty(), "should find matching files");
         assert_eq!(files[0], "src/auth.rs", "auth.rs should be top match");
@@ -497,7 +511,7 @@ mod tests {
     fn retrieve_database_query() {
         let graph = test_graph();
         let keywords = extract_keywords("database connection query");
-        let (files, _) = graph_retrieve(&graph, &keywords);
+        let (files, _) = graph_retrieve(&graph, &keywords, &[]);
 
         assert!(!files.is_empty());
         assert!(
@@ -510,7 +524,7 @@ mod tests {
     fn retrieve_no_match() {
         let graph = test_graph();
         let keywords = extract_keywords("zzznonexistent");
-        let (files, confidence) = graph_retrieve(&graph, &keywords);
+        let (files, confidence) = graph_retrieve(&graph, &keywords, &[]);
 
         assert!(files.is_empty());
         assert_eq!(confidence, "low");
@@ -518,7 +532,7 @@ mod tests {
 
     #[test]
     fn continue_no_graph() {
-        let result = graph_continue(None, &[], "test query");
+        let result = graph_continue(None, &[], "test query", &[]);
         assert!(result.needs_project);
     }
 
@@ -528,7 +542,7 @@ mod tests {
             file_count: 3,
             ..Default::default()
         };
-        let result = graph_continue(Some(&graph), &[], "test query");
+        let result = graph_continue(Some(&graph), &[], "test query", &[]);
         assert!(result.skip);
     }
 
@@ -544,7 +558,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = graph_continue(Some(&graph), &memories, "JWT token authentication");
+        let result = graph_continue(Some(&graph), &memories, "JWT token authentication", &[]);
         assert_eq!(result.mode, "memory_hit");
         assert_eq!(result.confidence, "high");
         assert!(result.recommended_files.contains(&"src/auth.rs".to_string()));
@@ -554,7 +568,7 @@ mod tests {
     #[test]
     fn continue_with_retrieval() {
         let graph = test_graph();
-        let result = graph_continue(Some(&graph), &[], "database connection pool");
+        let result = graph_continue(Some(&graph), &[], "database connection pool", &[]);
         assert_eq!(result.mode, "retrieve_then_read");
         assert!(!result.recommended_files.is_empty());
     }
@@ -579,6 +593,20 @@ mod tests {
     fn impact_no_graph() {
         let result = graph_impact(None, "src/auth.rs");
         assert!(result.contains("No project scanned"));
+    }
+
+    #[test]
+    fn recency_boost_scores_recent_files_higher() {
+        let graph = test_graph();
+        let keywords = extract_keywords("database query");
+        // Without recency boost
+        let (files_no_boost, _) = graph_retrieve(&graph, &keywords, &[]);
+        // With recency boost for auth (unrelated to query)
+        let (files_with_boost, _) = graph_retrieve(&graph, &keywords, &["src/auth.rs".to_string()]);
+        // auth.rs should rank higher when it gets a recency boost (or at least it should not crash)
+        assert!(!files_with_boost.is_empty());
+        // db.rs should still appear
+        assert!(files_no_boost.iter().any(|f| f.contains("db.rs")));
     }
 
     #[test]

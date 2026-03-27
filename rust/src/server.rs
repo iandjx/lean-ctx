@@ -968,10 +968,25 @@ impl ServerHandler for LeanCtxServer {
                 let query = get_str(args, "query")
                     .ok_or_else(|| ErrorData::invalid_params("query is required", None))?;
                 let graph = self.graph.read().await;
+                let recent_files: Vec<String> = graph
+                    .action_graph
+                    .actions
+                    .iter()
+                    .rev()
+                    .take(20)
+                    .filter_map(|a| {
+                        if a.kind == "read" || a.kind == "edit" {
+                            a.payload.as_ref()?.get("file")?.as_str().map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 let result = crate::graph::retrieval::graph_continue(
                     graph.info_graph.as_ref(),
                     &graph.context_store,
                     &query,
+                    &recent_files,
                 );
                 result.to_json()
             }
@@ -983,7 +998,7 @@ impl ServerHandler for LeanCtxServer {
                 match graph.info_graph.as_ref() {
                     Some(ig) => {
                         let (files, confidence) =
-                            crate::graph::retrieval::graph_retrieve(ig, &keywords);
+                            crate::graph::retrieval::graph_retrieve(ig, &keywords, &[]);
                         format!(
                             r#"{{"ok":true,"files":{},"confidence":"{}"}}"#,
                             serde_json::to_string(&files).unwrap_or_else(|_| "[]".to_string()),

@@ -115,7 +115,15 @@ pub fn graph_continue(
 
     // 4. Run graph retrieval
     let expanded_keywords = expand_keywords(&query_keywords);
-    let (recommended, confidence) = graph_retrieve(graph, &expanded_keywords, recent_files);
+    let (mut recommended, confidence) = graph_retrieve(graph, &expanded_keywords, recent_files);
+
+    // Shingling fallback: when confidence is low and retrieval found nothing
+    if confidence == "low" && recommended.is_empty() {
+        let shingle_results = shingling_fallback(graph, query, 5);
+        if !shingle_results.is_empty() {
+            recommended = shingle_results;
+        }
+    }
 
     let (max_greps, max_files) = caps_for_confidence(&confidence);
 
@@ -325,6 +333,63 @@ fn search_memories(store: &[MemoryEntry], query_keywords: &[String]) -> Vec<Memo
         .take(3)
         .map(|(_, entry)| entry.clone())
         .collect()
+}
+
+/// Build a set of character bigrams from a string.
+fn char_bigrams(s: &str) -> std::collections::HashSet<String> {
+    let lower = s.to_lowercase();
+    let chars: Vec<char> = lower.chars().collect();
+    chars.windows(2)
+        .map(|w| format!("{}{}", w[0], w[1]))
+        .collect()
+}
+
+/// Compute Jaccard similarity between two bigram sets.
+fn jaccard(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<String>) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    let intersection = a.intersection(b).count();
+    let union = a.union(b).count();
+    if union == 0 { 0.0 } else { intersection as f64 / union as f64 }
+}
+
+/// Fallback retrieval using bigram shingling + Jaccard similarity.
+/// Used when lexical retrieval confidence is low and rg finds nothing.
+/// Returns up to `top_n` file paths ranked by similarity to the query.
+pub fn shingling_fallback(graph: &InfoGraph, query: &str, top_n: usize) -> Vec<String> {
+    let query_bigrams = char_bigrams(query);
+    if query_bigrams.is_empty() {
+        return vec![];
+    }
+
+    let mut scored: Vec<(String, f64)> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.kind == "file")
+        .filter_map(|n| {
+            // Build a comparable string from the node's keywords + summary
+            let mut text = n.keywords.join(" ");
+            if let Some(ref s) = n.summary {
+                text.push(' ');
+                text.push_str(s);
+            }
+            if let Some(ref d) = n.docs {
+                text.push(' ');
+                text.push_str(d);
+            }
+            let node_bigrams = char_bigrams(&text);
+            let sim = jaccard(&query_bigrams, &node_bigrams);
+            if sim > 0.05 {
+                Some((n.path.clone(), sim))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.into_iter().take(top_n).map(|(p, _)| p).collect()
 }
 
 /// Returns true if a keyword looks like a function/method name
@@ -684,6 +749,44 @@ mod tests {
     fn impact_no_graph() {
         let result = graph_impact(None, "src/auth.rs");
         assert!(result.contains("No project scanned"));
+    }
+
+    #[test]
+    fn char_bigrams_produces_expected_bigrams() {
+        let bg = char_bigrams("auth");
+        assert!(bg.contains("au"));
+        assert!(bg.contains("ut"));
+        assert!(bg.contains("th"));
+    }
+
+    #[test]
+    fn jaccard_identical_sets_is_one() {
+        let a: std::collections::HashSet<String> = ["ab", "bc", "cd"].iter().map(|s| s.to_string()).collect();
+        let b = a.clone();
+        assert_eq!(jaccard(&a, &b), 1.0);
+    }
+
+    #[test]
+    fn jaccard_disjoint_sets_is_zero() {
+        let a: std::collections::HashSet<String> = ["ab", "bc"].iter().map(|s| s.to_string()).collect();
+        let b: std::collections::HashSet<String> = ["xy", "yz"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(jaccard(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn shingling_fallback_finds_similar_files() {
+        let graph = test_graph();
+        // Query that's semantically related to "auth" via bigrams
+        let results = shingling_fallback(&graph, "authentication token jwt", 3);
+        // Should find auth.rs since it has auth-related keywords
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn shingling_fallback_empty_query_returns_empty() {
+        let graph = test_graph();
+        let results = shingling_fallback(&graph, "", 3);
+        assert!(results.is_empty());
     }
 
     #[test]

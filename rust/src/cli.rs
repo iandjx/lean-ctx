@@ -9,6 +9,7 @@ use crate::core::protocol;
 use crate::core::signatures;
 use crate::core::stats;
 use crate::core::tokens::count_tokens;
+use crate::hooks::to_bash_compatible_path;
 
 pub fn cmd_read(args: &[String]) {
     if args.is_empty() {
@@ -603,19 +604,21 @@ pub fn cmd_init(args: &[String]) {
     let global = args.iter().any(|a| a == "--global" || a == "-g");
     let with_graph = args.iter().any(|a| a == "--with-graph");
 
-    let agent = args
-        .iter()
-        .position(|a| a == "--agent")
-        .and_then(|i| args.get(i + 1))
-        .map(|s| s.as_str());
+    let agents: Vec<&str> = args
+        .windows(2)
+        .filter(|w| w[0] == "--agent")
+        .map(|w| w[1].as_str())
+        .collect();
 
     if with_graph {
         init_graph(args);
         return;
     }
 
-    if let Some(agent_name) = agent {
-        crate::hooks::install_agent_hook(agent_name);
+    if !agents.is_empty() {
+        for agent_name in &agents {
+            crate::hooks::install_agent_hook(agent_name, global);
+        }
         println!("\nRun 'lean-ctx gain' after using some commands to see your savings.");
         return;
     }
@@ -631,10 +634,13 @@ pub fn cmd_init(args: &[String]) {
 
     if is_powershell {
         init_powershell(&binary);
-    } else if is_fish {
-        init_fish();
     } else {
-        init_posix(is_zsh);
+        let bash_binary = to_bash_compatible_path(&binary);
+        if is_fish {
+            init_fish(&bash_binary);
+        } else {
+            init_posix(is_zsh, &bash_binary);
+        }
     }
 
     let lean_dir = dirs::home_dir().map(|h| h.join(".lean-ctx"));
@@ -708,8 +714,18 @@ if (-not $env:LEAN_CTX_ACTIVE) {{
 
     if let Ok(existing) = std::fs::read_to_string(&profile_path) {
         if existing.contains("lean-ctx shell hook") {
-            println!("lean-ctx already configured in {}", profile_path.display());
-            return;
+            let cleaned = remove_lean_ctx_block_ps(&existing);
+            match std::fs::write(&profile_path, format!("{cleaned}{functions}")) {
+                Ok(()) => {
+                    println!("Updated lean-ctx functions in {}", profile_path.display());
+                    println!("  Binary: {binary}");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("Error updating {}: {e}", profile_path.display());
+                    return;
+                }
+            }
         }
     }
 
@@ -722,47 +738,88 @@ if (-not $env:LEAN_CTX_ACTIVE) {{
             use std::io::Write;
             let _ = f.write_all(functions.as_bytes());
             println!("Added lean-ctx functions to {}", profile_path.display());
+            println!("  Binary: {binary}");
         }
         Err(e) => eprintln!("Error writing {}: {e}", profile_path.display()),
     }
 }
 
-fn init_fish() {
+fn remove_lean_ctx_block_ps(content: &str) -> String {
+    let mut result = String::new();
+    let mut in_block = false;
+    let mut brace_depth = 0i32;
+
+    for line in content.lines() {
+        if line.contains("lean-ctx shell hook") {
+            in_block = true;
+            continue;
+        }
+        if in_block {
+            brace_depth += line.matches('{').count() as i32;
+            brace_depth -= line.matches('}').count() as i32;
+            if brace_depth <= 0 && (line.trim() == "}" || line.trim().is_empty()) {
+                if line.trim() == "}" {
+                    in_block = false;
+                    brace_depth = 0;
+                }
+                continue;
+            }
+            continue;
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+    result
+}
+
+fn init_fish(binary: &str) {
     let config = dirs::home_dir()
         .map(|h| h.join(".config/fish/config.fish"))
         .unwrap_or_default();
 
-    let aliases = "\n# lean-ctx shell hook — transparent CLI compression (90+ patterns)\n\
+    let aliases = format!(
+        "\n# lean-ctx shell hook — transparent CLI compression (90+ patterns)\n\
         if not set -q LEAN_CTX_ACTIVE\n\
-        \talias git 'lean-ctx -c git'\n\
-        \talias npm 'lean-ctx -c npm'\n\
-        \talias pnpm 'lean-ctx -c pnpm'\n\
-        \talias yarn 'lean-ctx -c yarn'\n\
-        \talias cargo 'lean-ctx -c cargo'\n\
-        \talias docker 'lean-ctx -c docker'\n\
-        \talias docker-compose 'lean-ctx -c docker-compose'\n\
-        \talias kubectl 'lean-ctx -c kubectl'\n\
-        \talias k 'lean-ctx -c kubectl'\n\
-        \talias gh 'lean-ctx -c gh'\n\
-        \talias pip 'lean-ctx -c pip'\n\
-        \talias pip3 'lean-ctx -c pip3'\n\
-        \talias ruff 'lean-ctx -c ruff'\n\
-        \talias go 'lean-ctx -c go'\n\
-        \talias golangci-lint 'lean-ctx -c golangci-lint'\n\
-        \talias eslint 'lean-ctx -c eslint'\n\
-        \talias prettier 'lean-ctx -c prettier'\n\
-        \talias tsc 'lean-ctx -c tsc'\n\
-        \talias ls 'lean-ctx -c ls'\n\
-        \talias find 'lean-ctx -c find'\n\
-        \talias grep 'lean-ctx -c grep'\n\
-        \talias curl 'lean-ctx -c curl'\n\
-        \talias wget 'lean-ctx -c wget'\n\
-        end\n";
+        \talias git '{binary} -c git'\n\
+        \talias npm '{binary} -c npm'\n\
+        \talias pnpm '{binary} -c pnpm'\n\
+        \talias yarn '{binary} -c yarn'\n\
+        \talias cargo '{binary} -c cargo'\n\
+        \talias docker '{binary} -c docker'\n\
+        \talias docker-compose '{binary} -c docker-compose'\n\
+        \talias kubectl '{binary} -c kubectl'\n\
+        \talias k '{binary} -c kubectl'\n\
+        \talias gh '{binary} -c gh'\n\
+        \talias pip '{binary} -c pip'\n\
+        \talias pip3 '{binary} -c pip3'\n\
+        \talias ruff '{binary} -c ruff'\n\
+        \talias go '{binary} -c go'\n\
+        \talias golangci-lint '{binary} -c golangci-lint'\n\
+        \talias eslint '{binary} -c eslint'\n\
+        \talias prettier '{binary} -c prettier'\n\
+        \talias tsc '{binary} -c tsc'\n\
+        \talias ls '{binary} -c ls'\n\
+        \talias find '{binary} -c find'\n\
+        \talias grep '{binary} -c grep'\n\
+        \talias curl '{binary} -c curl'\n\
+        \talias wget '{binary} -c wget'\n\
+        end\n"
+    );
 
     if let Ok(existing) = std::fs::read_to_string(&config) {
-        if existing.contains("lean-ctx") {
-            println!("lean-ctx already configured in {}", config.display());
-            return;
+        if existing.contains("lean-ctx shell hook") {
+            let cleaned = remove_lean_ctx_block(&existing);
+            match std::fs::write(&config, format!("{cleaned}{aliases}")) {
+                Ok(()) => {
+                    println!("Updated lean-ctx aliases in {}", config.display());
+                    println!("  Binary: {binary}");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("Error updating {}: {e}", config.display());
+                    return;
+                }
+            }
         }
     }
 
@@ -775,12 +832,13 @@ fn init_fish() {
             use std::io::Write;
             let _ = f.write_all(aliases.as_bytes());
             println!("Added lean-ctx aliases to {}", config.display());
+            println!("  Binary: {binary}");
         }
         Err(e) => eprintln!("Error writing {}: {e}", config.display()),
     }
 }
 
-fn init_posix(is_zsh: bool) {
+fn init_posix(is_zsh: bool, binary: &str) {
     let rc_file = if is_zsh {
         dirs::home_dir()
             .map(|h| h.join(".zshrc"))
@@ -791,39 +849,51 @@ fn init_posix(is_zsh: bool) {
             .unwrap_or_default()
     };
 
-    let aliases = r#"
+    let aliases = format!(
+        r#"
 # lean-ctx shell hook — transparent CLI compression (90+ patterns)
 if [ -z "$LEAN_CTX_ACTIVE" ]; then
-alias git='lean-ctx -c git'
-alias npm='lean-ctx -c npm'
-alias pnpm='lean-ctx -c pnpm'
-alias yarn='lean-ctx -c yarn'
-alias cargo='lean-ctx -c cargo'
-alias docker='lean-ctx -c docker'
-alias docker-compose='lean-ctx -c docker-compose'
-alias kubectl='lean-ctx -c kubectl'
-alias k='lean-ctx -c kubectl'
-alias gh='lean-ctx -c gh'
-alias pip='lean-ctx -c pip'
-alias pip3='lean-ctx -c pip3'
-alias ruff='lean-ctx -c ruff'
-alias go='lean-ctx -c go'
-alias golangci-lint='lean-ctx -c golangci-lint'
-alias eslint='lean-ctx -c eslint'
-alias prettier='lean-ctx -c prettier'
-alias tsc='lean-ctx -c tsc'
-alias ls='lean-ctx -c ls'
-alias find='lean-ctx -c find'
-alias grep='lean-ctx -c grep'
-alias curl='lean-ctx -c curl'
-alias wget='lean-ctx -c wget'
+alias git='{binary} -c git'
+alias npm='{binary} -c npm'
+alias pnpm='{binary} -c pnpm'
+alias yarn='{binary} -c yarn'
+alias cargo='{binary} -c cargo'
+alias docker='{binary} -c docker'
+alias docker-compose='{binary} -c docker-compose'
+alias kubectl='{binary} -c kubectl'
+alias k='{binary} -c kubectl'
+alias gh='{binary} -c gh'
+alias pip='{binary} -c pip'
+alias pip3='{binary} -c pip3'
+alias ruff='{binary} -c ruff'
+alias go='{binary} -c go'
+alias golangci-lint='{binary} -c golangci-lint'
+alias eslint='{binary} -c eslint'
+alias prettier='{binary} -c prettier'
+alias tsc='{binary} -c tsc'
+alias ls='{binary} -c ls'
+alias find='{binary} -c find'
+alias grep='{binary} -c grep'
+alias curl='{binary} -c curl'
+alias wget='{binary} -c wget'
 fi
-"#;
+"#
+    );
 
     if let Ok(existing) = std::fs::read_to_string(&rc_file) {
         if existing.contains("lean-ctx shell hook") {
-            println!("lean-ctx already configured in {}", rc_file.display());
-            return;
+            let cleaned = remove_lean_ctx_block(&existing);
+            match std::fs::write(&rc_file, format!("{cleaned}{aliases}")) {
+                Ok(()) => {
+                    println!("Updated lean-ctx aliases in {}", rc_file.display());
+                    println!("  Binary: {binary}");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("Error updating {}: {e}", rc_file.display());
+                    return;
+                }
+            }
         }
     }
 
@@ -836,9 +906,39 @@ fi
             use std::io::Write;
             let _ = f.write_all(aliases.as_bytes());
             println!("Added lean-ctx aliases to {}", rc_file.display());
+            println!("  Binary: {binary}");
         }
         Err(e) => eprintln!("Error writing {}: {e}", rc_file.display()),
     }
+}
+
+fn remove_lean_ctx_block(content: &str) -> String {
+    let mut result = String::new();
+    let mut in_block = false;
+
+    for line in content.lines() {
+        if line.contains("lean-ctx shell hook") {
+            in_block = true;
+            continue;
+        }
+        if in_block {
+            if line.trim() == "fi" || line.trim() == "end" || line.trim().is_empty() {
+                if line.trim() == "fi" || line.trim() == "end" {
+                    in_block = false;
+                }
+                continue;
+            }
+            if !line.starts_with("alias ") && !line.starts_with('\t') && !line.starts_with("if ") {
+                in_block = false;
+                result.push_str(line);
+                result.push('\n');
+            }
+            continue;
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+    result
 }
 
 pub fn load_shell_history_pub() -> Vec<String> {
@@ -1028,3 +1128,58 @@ graph_add_memory(type="decision", content="max 15 words", tags=["topic"], files=
 ```
 "#;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_remove_lean_ctx_block_posix() {
+        let input = r#"# existing config
+export PATH="$HOME/bin:$PATH"
+
+# lean-ctx shell hook — transparent CLI compression (90+ patterns)
+if [ -z "$LEAN_CTX_ACTIVE" ]; then
+alias git='lean-ctx -c git'
+alias npm='lean-ctx -c npm'
+fi
+
+# other stuff
+export EDITOR=vim
+"#;
+        let result = remove_lean_ctx_block(input);
+        assert!(!result.contains("lean-ctx"), "block should be removed");
+        assert!(result.contains("export PATH"), "other content preserved");
+        assert!(
+            result.contains("export EDITOR"),
+            "trailing content preserved"
+        );
+    }
+
+    #[test]
+    fn test_remove_lean_ctx_block_fish() {
+        let input = "# other fish config\nset -x FOO bar\n\n# lean-ctx shell hook — transparent CLI compression (90+ patterns)\nif not set -q LEAN_CTX_ACTIVE\n\talias git 'lean-ctx -c git'\n\talias npm 'lean-ctx -c npm'\nend\n\n# more config\nset -x BAZ qux\n";
+        let result = remove_lean_ctx_block(input);
+        assert!(!result.contains("lean-ctx"), "block should be removed");
+        assert!(result.contains("set -x FOO"), "other content preserved");
+        assert!(result.contains("set -x BAZ"), "trailing content preserved");
+    }
+
+    #[test]
+    fn test_remove_lean_ctx_block_ps() {
+        let input = "# PowerShell profile\n$env:FOO = 'bar'\n\n# lean-ctx shell hook — transparent CLI compression (90+ patterns)\nif (-not $env:LEAN_CTX_ACTIVE) {\n  $LeanCtxBin = \"C:\\\\bin\\\\lean-ctx.exe\"\n  function git { & $LeanCtxBin -c \"git $($args -join ' ')\" }\n}\n\n# other stuff\n$env:EDITOR = 'vim'\n";
+        let result = remove_lean_ctx_block_ps(input);
+        assert!(
+            !result.contains("lean-ctx shell hook"),
+            "block should be removed"
+        );
+        assert!(result.contains("$env:FOO"), "other content preserved");
+        assert!(result.contains("$env:EDITOR"), "trailing content preserved");
+    }
+
+    #[test]
+    fn test_remove_block_no_lean_ctx() {
+        let input = "# normal bashrc\nexport PATH=\"$HOME/bin:$PATH\"\n";
+        let result = remove_lean_ctx_block(input);
+        assert!(result.contains("export PATH"), "content unchanged");
+    }
+}

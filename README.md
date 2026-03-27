@@ -1,12 +1,13 @@
 # lean-ctx
 
-**Context Intelligence Engine with CCP + TDD. Shell Hook + MCP Server. 21 MCP tools, 90+ shell patterns, cross-session memory (CCP), LITM-aware positioning, tree-sitter AST for 14 languages. Single Rust binary.**
+**Context Intelligence Engine with CEP + CCP + TDD. Shell Hook + MCP Server. 21 MCP tools, 90+ shell patterns, Cognitive Efficiency Protocol (CEP), cross-session memory (CCP), Token Dense Dialect (TDD), LITM-aware positioning, tree-sitter AST for 14 languages. Single Rust binary.**
 
 [![CI](https://github.com/yvgude/lean-ctx/actions/workflows/ci.yml/badge.svg)](https://github.com/yvgude/lean-ctx/actions/workflows/ci.yml)
 [![Security Check](https://github.com/yvgude/lean-ctx/actions/workflows/security-check.yml/badge.svg)](https://github.com/yvgude/lean-ctx/actions/workflows/security-check.yml)
 [![Crates.io](https://img.shields.io/crates/v/lean-ctx)](https://crates.io/crates/lean-ctx)
 [![Downloads](https://img.shields.io/crates/d/lean-ctx)](https://crates.io/crates/lean-ctx)
 [![AUR](https://img.shields.io/aur/version/lean-ctx)](https://aur.archlinux.org/packages/lean-ctx)
+[![npm](https://img.shields.io/npm/v/pi-lean-ctx)](https://www.npmjs.com/package/pi-lean-ctx)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/pTHkG9Hew9)
 
@@ -14,11 +15,19 @@
 
 ---
 
-lean-ctx reduces LLM token consumption by **up to 99%** through two complementary strategies in a single binary:
+lean-ctx reduces LLM token consumption by **up to 99%** through three complementary strategies in a single binary:
 
 1. **Shell Hook** — Transparently compresses CLI output (90+ patterns) before it reaches the LLM. Works without LLM cooperation.
-2. **MCP Server** — 21 tools for cached file reads, adaptive mode selection, incremental deltas, dependency maps, intent detection, cross-file dedup, project graph, cross-session memory (CCP), and session metrics. Works with Cursor, GitHub Copilot, Claude Code, Windsurf, OpenAI Codex, Google Antigravity, OpenCode, and any MCP-compatible editor.
-3. **AI Tool Hooks** — One-command integration for Claude Code, Cursor, Gemini CLI, Codex, Windsurf, and Cline via `lean-ctx init --agent <tool>`.
+2. **MCP Server** — 21 tools for cached file reads, adaptive mode selection, incremental deltas, dependency maps, intent detection, cross-file dedup, project graph, cross-session memory (CCP), and session metrics. Works with Cursor, GitHub Copilot, Claude Code, Windsurf, Zed, Pi, OpenAI Codex, Google Antigravity, OpenCode, and any MCP-compatible editor.
+3. **AI Tool Hooks** — One-command integration for Claude Code, Cursor, Gemini CLI, Codex, Windsurf, Cline, and Pi via `lean-ctx init --agent <tool>`.
+
+### Three Intelligence Protocols
+
+| Protocol | Since | Purpose | Impact |
+|---|---|---|---|
+| **CEP** (Cognitive Efficiency Protocol) | v2.3.0 | Adaptive LLM communication optimization with compliance scoring (0-100), task complexity classification, quality scoring, auto-validation pipeline | Measurable efficiency gains |
+| **CCP** (Context Continuity Protocol) | v2.0.0 | Cross-session memory that persists task, findings, decisions across chats. LITM-aware positioning for optimal attention placement | -99.2% cold-start tokens |
+| **TDD** (Token Dense Dialect) | v1.7.0 | Symbol shorthand (λ, §, ∂, τ, ε) and ROI-based identifier mapping for compact LLM communication | 8-25% extra savings |
 
 ## Token Savings (Typical Cursor/Claude Code Session)
 
@@ -77,7 +86,7 @@ cp target/release/lean-ctx ~/.local/bin/
 ### Verify Installation
 
 ```bash
-lean-ctx --version   # Should show "lean-ctx 2.1.1"
+lean-ctx --version   # Should show "lean-ctx 2.3.3"
 lean-ctx gain        # Should show token savings stats
 ```
 
@@ -105,6 +114,28 @@ Configure with `LEAN_CTX_CRP_MODE`:
 - `tdd` (default) — Maximum compression with symbol shorthand
 - `compact` — Moderate: skip filler words, use abbreviations
 - `off` — Standard output, no CRP instructions
+
+## Cognitive Efficiency Protocol (CEP)
+
+New in v2.3.0: CEP is a holistic approach to LLM communication optimization that measures, scores, and adapts how efficiently the model processes context.
+
+**CEP Compliance Score** (0-100): Tracks four dimensions:
+- **Cache Utilization** — percentage of file reads served from session cache
+- **Mode Diversity** — use of different read modes (map, signatures, aggressive, entropy) vs. always using full
+- **Compression Rate** — overall token reduction across all operations
+- **Action-first Behavior** — structured notation over prose
+
+**Adaptive Instructions Engine**: Classifies task complexity automatically:
+- `Mechanical` — simple renames, format fixes → minimal reasoning guidance
+- `Standard` — feature implementation, refactoring → balanced guidance
+- `Architectural` — system design, cross-cutting changes → full reasoning with edge case analysis
+
+**Additional CEP features**:
+- Smart Context Prefill Hints — suggests optimal read modes after session restore
+- Quality Scorer — measures AST, identifier, and line preservation (>95% target)
+- Auto-Validation Pipeline — syntax checks for Rust, JS/TS, Python, JSON, TOML after file changes
+- Dashboard CEP Intelligence Card — real-time CEP metrics in the web dashboard
+- MCP Live Stats — persists session metrics to `~/.lean-ctx/mcp-live.json` for external tooling
 
 ## Quick Start
 
@@ -185,6 +216,7 @@ lean-ctx init --agent gemini   # Install Gemini CLI BeforeTool hook
 lean-ctx init --agent codex    # Install Codex AGENTS.md
 lean-ctx init --agent windsurf # Install .windsurfrules
 lean-ctx init --agent cline    # Install .clinerules
+lean-ctx init --agent pi       # Install Pi Coding Agent extension
 lean-ctx gain                  # Persistent token savings (CLI)
 lean-ctx gain --graph          # ASCII chart of last 30 days
 lean-ctx gain --daily          # Day-by-day breakdown
@@ -343,7 +375,7 @@ $ lean-ctx gain
   03-23    101 cmds      9.4K saved   46.0%
   03-24    419 cmds      1.7M saved   77.0%
 
-  lean-ctx v2.1.1  |  leanctx.com  |  lean-ctx dashboard
+  lean-ctx v2.3.0  |  leanctx.com  |  lean-ctx dashboard
 ```
 
 ## 21 MCP Tools
@@ -494,6 +526,39 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 ```
 
 > **Troubleshooting:** If Windsurf detects the server but tools don't load, use the **full path** to the binary (e.g., `/Users/you/.cargo/bin/lean-ctx` or `/usr/local/bin/lean-ctx`). Windsurf spawns MCP servers with a minimal PATH that may not include `~/.cargo/bin`. Find your path with `which lean-ctx`.
+
+### Zed
+
+Add to `~/.config/zed/settings.json`:
+
+```json
+{
+  "context_servers": {
+    "lean-ctx": {
+      "source": "custom",
+      "command": "lean-ctx",
+      "args": [],
+      "env": {}
+    }
+  }
+}
+```
+
+> **Note:** Zed requires `source: "custom"` for manually configured MCP servers. Use the full path to the binary if `lean-ctx` is not in Zed's PATH (e.g., `"/Users/you/.cargo/bin/lean-ctx"`). Verify the server status in the Agent Panel settings — a green dot indicates the server is active.
+
+### Pi Coding Agent
+
+```bash
+# Install the Pi extension (auto-installs pi-lean-ctx npm package)
+lean-ctx init --agent pi
+
+# Or install manually
+pi install pi-lean-ctx
+```
+
+Once installed, Pi's `bash`, `read`, `grep`, `find`, and `ls` tools are automatically routed through lean-ctx. No manual prefixing needed — the extension handles compression transparently.
+
+> **Smart reads:** The extension automatically selects the optimal read mode based on file type and size (full for small files, map for medium code, signatures for large code files).
 
 ### OpenAI Codex
 
@@ -662,7 +727,7 @@ Opens `http://localhost:3333` with:
 | **Thinking reduction** | ✗ | ✓ CRP v2 (30-60% fewer thinking tokens via Cursor Rules) |
 | **Stats & Graphs** | ✓ `rtk gain` (SQLite + ASCII graph) | ✓ Visual terminal dashboard (ANSI colors, Unicode bars, sparklines, USD) + `--graph` + `--daily` + `--json` + web dashboard |
 | **Auto-setup** | ✓ `rtk init` | ✓ `lean-ctx init` |
-| **Editors** | Claude Code, OpenCode, Gemini CLI | **All MCP editors (Cursor, Copilot, Claude Code, Windsurf, Codex, Antigravity, OpenCode) + shell hook (OpenClaw, any terminal)** |
+| **Editors** | Claude Code, OpenCode, Gemini CLI | **All MCP editors (Cursor, Copilot, Claude Code, Windsurf, Zed, Codex, Antigravity, OpenCode) + shell hook (OpenClaw, any terminal)** |
 | **Config file** | TOML | ✓ TOML (`~/.lean-ctx/config.toml`) |
 | **History analysis** | ✗ | ✓ `lean-ctx discover` — find uncompressed commands |
 | **Homebrew** | ✓ | ✓ `brew tap yvgude/lean-ctx && brew install lean-ctx` |

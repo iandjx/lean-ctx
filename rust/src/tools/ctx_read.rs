@@ -42,12 +42,7 @@ fn handle_with_options(
 
     if cache.get(path).is_some() {
         if mode == "full" {
-            cache.record_cache_hit(path);
-            let existing = cache.get(path).unwrap();
-            return format!(
-                "{file_ref}={short} [cached {}t {}L ∅]",
-                existing.read_count, existing.line_count
-            );
+            return handle_full_with_auto_delta(cache, path, &file_ref, &short, ext, crp_mode);
         }
         let existing = cache.get(path).unwrap();
         let content = existing.content.clone();
@@ -71,27 +66,7 @@ fn handle_with_options(
     let (entry, _is_hit) = cache.store(path, content.clone());
 
     if mode == "full" {
-        let tokens = entry.original_tokens;
-        let header = build_header(&file_ref, &short, ext, &content, entry.line_count, true);
-
-        if crp_mode.is_tdd() {
-            let mut sym = SymbolMap::new();
-            let idents = symbol_map::extract_identifiers(&content, ext);
-            for ident in &idents {
-                sym.register(ident);
-            }
-            let compressed_content = sym.apply(&content);
-            let sym_table = sym.format_table();
-            let output = format!("{header}\n{compressed_content}{sym_table}");
-            let sent = count_tokens(&output);
-            let savings = protocol::format_savings(tokens, sent);
-            return format!("{output}\n{savings}");
-        }
-
-        let output = format!("{header}\n{content}");
-        let sent = count_tokens(&output);
-        let savings = protocol::format_savings(tokens, sent);
-        return format!("{output}\n{savings}");
+        return format_full_output(cache, &file_ref, &short, ext, &content, &entry, crp_mode);
     }
 
     process_mode(
@@ -105,6 +80,86 @@ fn handle_with_options(
     )
 }
 
+const AUTO_DELTA_THRESHOLD: f64 = 0.6;
+
+/// Re-reads from disk; if content changed and delta is compact, sends auto-delta.
+fn handle_full_with_auto_delta(
+    cache: &mut SessionCache,
+    path: &str,
+    file_ref: &str,
+    short: &str,
+    ext: &str,
+    crp_mode: CrpMode,
+) -> String {
+    let disk_content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => {
+            cache.record_cache_hit(path);
+            let existing = cache.get(path).unwrap();
+            return format!(
+                "{file_ref}={short} cached {}t {}L",
+                existing.read_count, existing.line_count
+            );
+        }
+    };
+
+    let old_content = cache.get(path).unwrap().content.clone();
+    let (entry, is_hit) = cache.store(path, disk_content.clone());
+
+    if is_hit {
+        return format!(
+            "{file_ref}={short} cached {}t {}L",
+            entry.read_count, entry.line_count
+        );
+    }
+
+    let diff = compressor::diff_content(&old_content, &disk_content);
+    let diff_tokens = count_tokens(&diff);
+    let full_tokens = entry.original_tokens;
+
+    if full_tokens > 0 && (diff_tokens as f64) < (full_tokens as f64 * AUTO_DELTA_THRESHOLD) {
+        let savings = protocol::format_savings(full_tokens, diff_tokens);
+        return format!(
+            "{file_ref}={short} [auto-delta] ∆{}L\n{diff}\n{savings}",
+            disk_content.lines().count()
+        );
+    }
+
+    format_full_output(cache, file_ref, short, ext, &disk_content, &entry, crp_mode)
+}
+
+fn format_full_output(
+    _cache: &mut SessionCache,
+    file_ref: &str,
+    short: &str,
+    ext: &str,
+    content: &str,
+    entry: &crate::core::cache::CacheEntry,
+    crp_mode: CrpMode,
+) -> String {
+    let tokens = entry.original_tokens;
+    let header = build_header(file_ref, short, ext, content, entry.line_count, true);
+
+    if crp_mode.is_tdd() {
+        let mut sym = SymbolMap::new();
+        let idents = symbol_map::extract_identifiers(content, ext);
+        for ident in &idents {
+            sym.register(ident);
+        }
+        let compressed_content = sym.apply(content);
+        let sym_table = sym.format_table();
+        let output = format!("{header}\n{compressed_content}{sym_table}");
+        let sent = count_tokens(&output);
+        let savings = protocol::format_savings(tokens, sent);
+        return format!("{output}\n{savings}");
+    }
+
+    let output = format!("{header}\n{content}");
+    let sent = count_tokens(&output);
+    let savings = protocol::format_savings(tokens, sent);
+    format!("{output}\n{savings}")
+}
+
 fn build_header(
     file_ref: &str,
     short: &str,
@@ -113,7 +168,7 @@ fn build_header(
     line_count: usize,
     include_deps: bool,
 ) -> String {
-    let mut header = format!("{file_ref}={short} [{line_count}L +]");
+    let mut header = format!("{file_ref}={short} {line_count}L");
 
     if include_deps {
         let dep_info = deps::extract_deps(content, ext);
@@ -124,7 +179,7 @@ fn build_header(
                 .take(8)
                 .map(|s| s.as_str())
                 .collect();
-            header.push_str(&format!(" deps:[{}]", imports_str.join(",")));
+            header.push_str(&format!("\n deps {}", imports_str.join(",")));
         }
         if !dep_info.exports.is_empty() {
             let exports_str: Vec<&str> = dep_info
@@ -133,7 +188,7 @@ fn build_header(
                 .take(8)
                 .map(|s| s.as_str())
                 .collect();
-            header.push_str(&format!(" exports:[{}]", exports_str.join(",")));
+            header.push_str(&format!("\n exports {}", exports_str.join(",")));
         }
     }
 
@@ -156,7 +211,7 @@ fn process_mode(
             let sigs = signatures::extract_signatures(content, ext);
             let dep_info = deps::extract_deps(content, ext);
 
-            let mut output = format!("{file_ref}={short} [{line_count}L]");
+            let mut output = format!("{file_ref}={short} {line_count}L");
             if !dep_info.imports.is_empty() {
                 let imports_str: Vec<&str> = dep_info
                     .imports
@@ -164,7 +219,7 @@ fn process_mode(
                     .take(8)
                     .map(|s| s.as_str())
                     .collect();
-                output.push_str(&format!(" deps:[{}]", imports_str.join(",")));
+                output.push_str(&format!("\n deps {}", imports_str.join(",")));
             }
             for sig in &sigs {
                 output.push('\n');
@@ -182,7 +237,7 @@ fn process_mode(
             let sigs = signatures::extract_signatures(content, ext);
             let dep_info = deps::extract_deps(content, ext);
 
-            let mut output = format!("{file_ref}={short} [{line_count}L]");
+            let mut output = format!("{file_ref}={short} {line_count}L");
 
             if !dep_info.imports.is_empty() {
                 output.push_str("\n  deps: ");
@@ -254,7 +309,7 @@ fn process_mode(
         mode if mode.starts_with("lines:") => {
             let range_str = &mode[6..];
             let extracted = extract_line_range(content, range_str);
-            let header = format!("{file_ref}={short} [{line_count}L lines:{range_str}]");
+            let header = format!("{file_ref}={short} {line_count}L lines:{range_str}");
             let sent = count_tokens(&extracted);
             let savings = protocol::format_savings(original_tokens, sent);
             format!("{header}\n{extracted}\n{savings}")
@@ -292,6 +347,60 @@ fn extract_line_range(content: &str, range_str: &str) -> String {
         "No lines matched the range.".to_string()
     } else {
         selected.join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_header_toon_format_no_brackets() {
+        let content = "use std::io;\nfn main() {}\n";
+        let header = build_header("F1", "main.rs", "rs", content, 2, false);
+        assert!(!header.contains('['));
+        assert!(!header.contains(']'));
+        assert!(header.contains("F1=main.rs 2L"));
+    }
+
+    #[test]
+    fn test_header_toon_deps_indented() {
+        let content = "use crate::core::cache;\nuse crate::tools;\npub fn main() {}\n";
+        let header = build_header("F1", "main.rs", "rs", content, 3, true);
+        if header.contains("deps") {
+            assert!(
+                header.contains("\n deps "),
+                "deps should use indented TOON format"
+            );
+            assert!(
+                !header.contains("deps:["),
+                "deps should not use bracket format"
+            );
+        }
+    }
+
+    #[test]
+    fn test_header_toon_saves_tokens() {
+        let content = "use crate::foo;\nuse crate::bar;\npub fn baz() {}\npub fn qux() {}\n";
+        let old_header = format!("F1=main.rs [4L +] deps:[foo,bar] exports:[baz,qux]");
+        let new_header = build_header("F1", "main.rs", "rs", content, 4, true);
+        let old_tokens = count_tokens(&old_header);
+        let new_tokens = count_tokens(&new_header);
+        assert!(
+            new_tokens <= old_tokens,
+            "TOON header ({new_tokens} tok) should be <= old format ({old_tokens} tok)"
+        );
+    }
+
+    #[test]
+    fn test_tdd_symbols_are_compact() {
+        let symbols = [
+            "⊕", "⊖", "∆", "→", "⇒", "✓", "✗", "⚠", "λ", "§", "∂", "τ", "ε",
+        ];
+        for sym in &symbols {
+            let tok = count_tokens(sym);
+            assert!(tok <= 2, "Symbol {sym} should be 1-2 tokens, got {tok}");
+        }
     }
 }
 

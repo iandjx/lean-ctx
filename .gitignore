@@ -19,3 +19,5 @@ memory-bank/
 server.md
 
 .dual-graph/
+.DS_Store
+DEPLOY_CHECKLIST.md

@@ -43,7 +43,7 @@ pub fn handle(path: &str, crp_mode: CrpMode) -> String {
     let entropy_result = entropy::entropy_compress(&content);
     let entropy_tokens = entropy_result.compressed_tokens;
 
-    let cache_hit = format!("F? [cached 2t {line_count}L ∅]");
+    let cache_hit = format!("F? cached 2t {line_count}L");
     let cache_tokens = count_tokens(&cache_hit);
 
     let mut sym = SymbolMap::new();

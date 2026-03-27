@@ -1,12 +1,12 @@
 ---
 name: lean-ctx
-description: Context Intelligence Engine with CCP — 21 MCP tools, 90+ shell patterns, tree-sitter AST for 14 languages, cross-session memory (CCP), LITM-aware positioning. Compresses LLM context by up to 99%.
+description: Context Intelligence Engine with CEP + CCP — 21 MCP tools, 90+ shell patterns, tree-sitter AST for 14 languages, Cognitive Efficiency Protocol (CEP), cross-session memory (CCP), LITM-aware positioning. Compresses LLM context by up to 99%.
 metadata: {"openclaw": {"requires": {"bins": ["lean-ctx"]}, "install": [{"id": "brew", "kind": "brew", "formula": "lean-ctx", "bins": ["lean-ctx"], "label": "Install LeanCTX (brew tap yvgude/lean-ctx)"}]}}
 ---
 
-# LeanCTX v2.1.1 — Context Intelligence Engine + CCP
+# LeanCTX v2.3.3 — Context Intelligence Engine + CEP + CCP + Scientific Optimizations
 
-LeanCTX is a Rust binary that optimizes LLM context through 21 MCP tools, 90+ shell compression patterns, and tree-sitter AST parsing for 14 languages (TS/JS, Rust, Python, Go, Java, C, C++, Ruby, C#, Kotlin, Swift, PHP). It provides adaptive file reading, incremental deltas, intent detection, cross-file deduplication, a project intelligence graph, and the **Context Continuity Protocol (CCP)** for cross-session memory with LITM-aware information positioning.
+LeanCTX is a Rust binary that optimizes LLM context through 21 MCP tools, 90+ shell compression patterns, and tree-sitter AST parsing for 14 languages (TS/JS, Rust, Python, Go, Java, C, C++, Ruby, C#, Kotlin, Swift, PHP). It provides adaptive file reading, incremental deltas, intent detection, cross-file deduplication, a project intelligence graph, the **Cognitive Efficiency Protocol (CEP)** for optimized LLM communication, and the **Context Continuity Protocol (CCP)** for cross-session memory with LITM-aware information positioning.
 
 ## When to use lean-ctx
 

@@ -1,23 +1,45 @@
 use std::path::PathBuf;
 
-pub fn install_agent_hook(agent: &str) {
+fn resolve_binary_path() -> String {
+    std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "lean-ctx".to_string())
+}
+
+fn resolve_binary_path_for_bash() -> String {
+    let path = resolve_binary_path();
+    to_bash_compatible_path(&path)
+}
+
+pub fn to_bash_compatible_path(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    if path.len() >= 2 && path.as_bytes()[1] == b':' {
+        let drive = (path.as_bytes()[0] as char).to_ascii_lowercase();
+        format!("/{drive}{}", &path[2..])
+    } else {
+        path
+    }
+}
+
+pub fn install_agent_hook(agent: &str, global: bool) {
     match agent {
-        "claude" | "claude-code" => install_claude_hook(),
-        "cursor" => install_cursor_hook(),
+        "claude" | "claude-code" => install_claude_hook(global),
+        "cursor" => install_cursor_hook(global),
         "gemini" => install_gemini_hook(),
         "codex" => install_codex_hook(),
-        "windsurf" => install_windsurf_rules(),
-        "cline" | "roo" => install_cline_rules(),
-        "copilot" => install_claude_hook(),
+        "windsurf" => install_windsurf_rules(global),
+        "cline" | "roo" => install_cline_rules(global),
+        "copilot" => install_claude_hook(global),
+        "pi" => install_pi_hook(global),
         _ => {
             eprintln!("Unknown agent: {agent}");
-            eprintln!("Supported: claude, cursor, gemini, codex, windsurf, cline, copilot");
+            eprintln!("Supported: claude, cursor, gemini, codex, windsurf, cline, copilot, pi");
             std::process::exit(1);
         }
     }
 }
 
-fn install_claude_hook() {
+fn install_claude_hook(global: bool) {
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => {
@@ -30,9 +52,13 @@ fn install_claude_hook() {
     let _ = std::fs::create_dir_all(&hooks_dir);
 
     let script_path = hooks_dir.join("lean-ctx-rewrite.sh");
-    let script = r#"#!/usr/bin/env bash
+    let binary = resolve_binary_path_for_bash();
+    let script = format!(
+        r#"#!/usr/bin/env bash
 # lean-ctx PreToolUse hook — rewrites bash commands to lean-ctx equivalents
 set -euo pipefail
+
+LEAN_CTX_BIN="{binary}"
 
 INPUT=$(cat)
 TOOL=$(echo "$INPUT" | grep -o '"tool_name":"[^"]*"' | head -1 | cut -d'"' -f4)
@@ -43,41 +69,42 @@ fi
 
 CMD=$(echo "$INPUT" | grep -o '"command":"[^"]*"' | head -1 | cut -d'"' -f4)
 
-if echo "$CMD" | grep -q "^lean-ctx "; then
+if echo "$CMD" | grep -qE "^(lean-ctx |$LEAN_CTX_BIN )"; then
   exit 0
 fi
 
 REWRITE=""
 case "$CMD" in
-  git\ *)       REWRITE="lean-ctx -c $CMD" ;;
-  gh\ *)        REWRITE="lean-ctx -c $CMD" ;;
-  cargo\ *)     REWRITE="lean-ctx -c $CMD" ;;
-  npm\ *)       REWRITE="lean-ctx -c $CMD" ;;
-  pnpm\ *)      REWRITE="lean-ctx -c $CMD" ;;
-  yarn\ *)      REWRITE="lean-ctx -c $CMD" ;;
-  docker\ *)    REWRITE="lean-ctx -c $CMD" ;;
-  kubectl\ *)   REWRITE="lean-ctx -c $CMD" ;;
-  pip\ *|pip3\ *)  REWRITE="lean-ctx -c $CMD" ;;
-  ruff\ *)      REWRITE="lean-ctx -c $CMD" ;;
-  go\ *)        REWRITE="lean-ctx -c $CMD" ;;
-  curl\ *)      REWRITE="lean-ctx -c $CMD" ;;
-  grep\ *|rg\ *)  REWRITE="lean-ctx -c $CMD" ;;
-  find\ *)      REWRITE="lean-ctx -c $CMD" ;;
-  cat\ *|head\ *|tail\ *)  REWRITE="lean-ctx -c $CMD" ;;
-  ls\ *|ls)     REWRITE="lean-ctx -c $CMD" ;;
-  eslint*|prettier*|tsc*)  REWRITE="lean-ctx -c $CMD" ;;
-  pytest*|ruff\ *|mypy*)   REWRITE="lean-ctx -c $CMD" ;;
-  aws\ *)       REWRITE="lean-ctx -c $CMD" ;;
-  helm\ *)      REWRITE="lean-ctx -c $CMD" ;;
+  git\ *)       REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  gh\ *)        REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  cargo\ *)     REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  npm\ *)       REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  pnpm\ *)      REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  yarn\ *)      REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  docker\ *)    REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  kubectl\ *)   REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  pip\ *|pip3\ *)  REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  ruff\ *)      REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  go\ *)        REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  curl\ *)      REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  grep\ *|rg\ *)  REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  find\ *)      REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  cat\ *|head\ *|tail\ *)  REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  ls\ *|ls)     REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  eslint*|prettier*|tsc*)  REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  pytest*|ruff\ *|mypy*)   REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  aws\ *)       REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
+  helm\ *)      REWRITE="$LEAN_CTX_BIN -c $CMD" ;;
   *)            exit 0 ;;
 esac
 
 if [ -n "$REWRITE" ]; then
-  echo "{\"command\":\"$REWRITE\"}"
+  echo "{{\"command\":\"$REWRITE\"}}"
 fi
-"#;
+"#
+    );
 
-    write_file(&script_path, script);
+    write_file(&script_path, &script);
     make_executable(&script_path);
 
     let settings_path = home.join(".claude").join("settings.json");
@@ -124,21 +151,27 @@ fi
         );
     }
 
-    let claude_md = PathBuf::from("CLAUDE.md");
-    if !claude_md.exists()
-        || !std::fs::read_to_string(&claude_md)
-            .unwrap_or_default()
-            .contains("lean-ctx")
-    {
-        let content = include_str!("templates/CLAUDE.md");
-        write_file(&claude_md, content);
-        println!("Created CLAUDE.md in current project directory.");
+    if !global {
+        let claude_md = PathBuf::from("CLAUDE.md");
+        if !claude_md.exists()
+            || !std::fs::read_to_string(&claude_md)
+                .unwrap_or_default()
+                .contains("lean-ctx")
+        {
+            let content = include_str!("templates/CLAUDE.md");
+            write_file(&claude_md, content);
+            println!("Created CLAUDE.md in current project directory.");
+        } else {
+            println!("CLAUDE.md already configured.");
+        }
     } else {
-        println!("CLAUDE.md already configured.");
+        println!(
+            "Global mode: skipping project-local CLAUDE.md (use without --global in a project)."
+        );
     }
 }
 
-fn install_cursor_hook() {
+fn install_cursor_hook(global: bool) {
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => {
@@ -151,20 +184,24 @@ fn install_cursor_hook() {
     let _ = std::fs::create_dir_all(&hooks_dir);
 
     let script_path = hooks_dir.join("lean-ctx-rewrite.sh");
-    let script = r#"#!/usr/bin/env bash
+    let binary = resolve_binary_path_for_bash();
+    let script = format!(
+        r#"#!/usr/bin/env bash
 # lean-ctx Cursor hook — rewrites shell commands
 set -euo pipefail
+LEAN_CTX_BIN="{binary}"
 INPUT=$(cat)
 CMD=$(echo "$INPUT" | grep -o '"command":"[^"]*"' | head -1 | cut -d'"' -f4 2>/dev/null || echo "")
-if [ -z "$CMD" ] || echo "$CMD" | grep -q "^lean-ctx "; then exit 0; fi
+if [ -z "$CMD" ] || echo "$CMD" | grep -qE "^(lean-ctx |$LEAN_CTX_BIN )"; then exit 0; fi
 case "$CMD" in
   git\ *|gh\ *|cargo\ *|npm\ *|pnpm\ *|docker\ *|kubectl\ *|pip\ *|ruff\ *|go\ *|curl\ *|grep\ *|rg\ *|find\ *|ls\ *|ls|cat\ *|aws\ *|helm\ *)
-    echo "{\"command\":\"lean-ctx -c $CMD\"}" ;;
+    echo "{{\"command\":\"$LEAN_CTX_BIN -c $CMD\"}}" ;;
   *) exit 0 ;;
 esac
-"#;
+"#
+    );
 
-    write_file(&script_path, script);
+    write_file(&script_path, &script);
     make_executable(&script_path);
 
     let hooks_json = home.join(".cursor").join("hooks.json");
@@ -194,15 +231,19 @@ esac
         println!("Installed Cursor hook at {}", hooks_json.display());
     }
 
-    let rules_dir = PathBuf::from(".cursor").join("rules");
-    let _ = std::fs::create_dir_all(&rules_dir);
-    let rule_path = rules_dir.join("lean-ctx.mdc");
-    if !rule_path.exists() {
-        let rule_content = include_str!("templates/lean-ctx.mdc");
-        write_file(&rule_path, rule_content);
-        println!("Created .cursor/rules/lean-ctx.mdc in current project.");
+    if !global {
+        let rules_dir = PathBuf::from(".cursor").join("rules");
+        let _ = std::fs::create_dir_all(&rules_dir);
+        let rule_path = rules_dir.join("lean-ctx.mdc");
+        if !rule_path.exists() {
+            let rule_content = include_str!("templates/lean-ctx.mdc");
+            write_file(&rule_path, rule_content);
+            println!("Created .cursor/rules/lean-ctx.mdc in current project.");
+        } else {
+            println!("Cursor rule already exists.");
+        }
     } else {
-        println!("Cursor rule already exists.");
+        println!("Global mode: skipping project-local .cursor/rules/ (use without --global in a project).");
     }
 
     println!("Restart Cursor to activate.");
@@ -221,20 +262,24 @@ fn install_gemini_hook() {
     let _ = std::fs::create_dir_all(&hooks_dir);
 
     let script_path = hooks_dir.join("lean-ctx-hook-gemini.sh");
-    let script = r#"#!/usr/bin/env bash
+    let binary = resolve_binary_path_for_bash();
+    let script = format!(
+        r#"#!/usr/bin/env bash
 # lean-ctx Gemini CLI BeforeTool hook
 set -euo pipefail
+LEAN_CTX_BIN="{binary}"
 INPUT=$(cat)
 CMD=$(echo "$INPUT" | grep -o '"command":"[^"]*"' | head -1 | cut -d'"' -f4 2>/dev/null || echo "")
-if [ -z "$CMD" ] || echo "$CMD" | grep -q "^lean-ctx "; then exit 0; fi
+if [ -z "$CMD" ] || echo "$CMD" | grep -qE "^(lean-ctx |$LEAN_CTX_BIN )"; then exit 0; fi
 case "$CMD" in
   git\ *|gh\ *|cargo\ *|npm\ *|pnpm\ *|docker\ *|kubectl\ *|pip\ *|ruff\ *|go\ *|curl\ *|grep\ *|rg\ *|find\ *|ls\ *|ls|cat\ *|aws\ *|helm\ *)
-    echo "{\"command\":\"lean-ctx -c $CMD\"}" ;;
+    echo "{{\"command\":\"$LEAN_CTX_BIN -c $CMD\"}}" ;;
   *) exit 0 ;;
 esac
-"#;
+"#
+    );
 
-    write_file(&script_path, script);
+    write_file(&script_path, &script);
     make_executable(&script_path);
 
     let settings_path = home.join(".gemini").join("settings.json");
@@ -291,18 +336,21 @@ fn install_codex_hook() {
     let agents_content = "# Global Agent Instructions\n\n@LEAN-CTX.md\n";
 
     let lean_ctx_md = codex_dir.join("LEAN-CTX.md");
-    let lean_ctx_content = r#"# lean-ctx — Token Optimization
+    let binary = resolve_binary_path();
+    let lean_ctx_content = format!(
+        r#"# lean-ctx — Token Optimization
 
-Prefix all shell commands with `lean-ctx -c` for compressed output:
+Prefix all shell commands with `{binary} -c` for compressed output:
 
 ```bash
-lean-ctx -c git status    # instead of: git status
-lean-ctx -c cargo test    # instead of: cargo test
-lean-ctx -c ls src/       # instead of: ls src/
+{binary} -c git status    # instead of: git status
+{binary} -c cargo test    # instead of: cargo test
+{binary} -c ls src/       # instead of: ls src/
 ```
 
 This saves 60-90% tokens per command. Works with: git, cargo, npm, pnpm, docker, kubectl, pip, ruff, go, curl, grep, find, ls, aws, helm, and 90+ more commands.
-"#;
+"#
+    );
 
     if agents_path.exists() {
         let content = std::fs::read_to_string(&agents_path).unwrap_or_default();
@@ -313,11 +361,16 @@ This saves 60-90% tokens per command. Works with: git, cargo, npm, pnpm, docker,
     }
 
     write_file(&agents_path, agents_content);
-    write_file(&lean_ctx_md, lean_ctx_content);
+    write_file(&lean_ctx_md, &lean_ctx_content);
     println!("Installed Codex instructions at {}", codex_dir.display());
 }
 
-fn install_windsurf_rules() {
+fn install_windsurf_rules(global: bool) {
+    if global {
+        println!("Global mode: skipping project-local .windsurfrules (use without --global in a project).");
+        return;
+    }
+
     let rules_path = PathBuf::from(".windsurfrules");
     if rules_path.exists() {
         let content = std::fs::read_to_string(&rules_path).unwrap_or_default();
@@ -332,7 +385,14 @@ fn install_windsurf_rules() {
     println!("Installed .windsurfrules in current project.");
 }
 
-fn install_cline_rules() {
+fn install_cline_rules(global: bool) {
+    if global {
+        println!(
+            "Global mode: skipping project-local .clinerules (use without --global in a project)."
+        );
+        return;
+    }
+
     let rules_path = PathBuf::from(".clinerules");
     if rules_path.exists() {
         let content = std::fs::read_to_string(&rules_path).unwrap_or_default();
@@ -342,19 +402,78 @@ fn install_cline_rules() {
         }
     }
 
-    let rules = r#"# lean-ctx Shell Optimization
-# Prefix all shell commands with `lean-ctx -c` for 60-90% token savings.
+    let binary = resolve_binary_path();
+    let rules = format!(
+        r#"# lean-ctx Shell Optimization
+# Prefix all shell commands with `{binary} -c` for 60-90% token savings.
 
-When running shell commands, always prefix them with `lean-ctx -c` to compress output. For example:
-- `lean-ctx -c git status` instead of `git status`
-- `lean-ctx -c cargo test` instead of `cargo test`
-- `lean-ctx -c ls src/` instead of `ls src/`
+When running shell commands, always prefix them with `{binary} -c` to compress output. For example:
+- `{binary} -c git status` instead of `git status`
+- `{binary} -c cargo test` instead of `cargo test`
+- `{binary} -c ls src/` instead of `ls src/`
 
 Supported commands: git, cargo, npm, pnpm, docker, kubectl, pip, ruff, go, curl, grep, find, ls, aws, helm, and 90+ more.
-"#;
+"#
+    );
 
-    write_file(&rules_path, rules);
+    write_file(&rules_path, &rules);
     println!("Installed .clinerules in current project.");
+}
+
+fn install_pi_hook(global: bool) {
+    let has_pi = std::process::Command::new("pi")
+        .arg("--version")
+        .output()
+        .is_ok();
+
+    if !has_pi {
+        println!("Pi Coding Agent not found in PATH.");
+        println!("Install Pi first: npm install -g @mariozechner/pi-coding-agent");
+        println!();
+    }
+
+    println!("Installing pi-lean-ctx Pi Package...");
+    println!();
+
+    let install_result = std::process::Command::new("pi")
+        .args(["install", "pi-lean-ctx"])
+        .status();
+
+    match install_result {
+        Ok(status) if status.success() => {
+            println!("Installed pi-lean-ctx Pi Package.");
+        }
+        _ => {
+            println!("Could not auto-install pi-lean-ctx. Install manually:");
+            println!("  pi install pi-lean-ctx");
+            println!();
+        }
+    }
+
+    if !global {
+        let agents_md = PathBuf::from("AGENTS.md");
+        if !agents_md.exists()
+            || !std::fs::read_to_string(&agents_md)
+                .unwrap_or_default()
+                .contains("lean-ctx")
+        {
+            let content = include_str!("templates/PI_AGENTS.md");
+            write_file(&agents_md, content);
+            println!("Created AGENTS.md in current project directory.");
+        } else {
+            println!("AGENTS.md already contains lean-ctx configuration.");
+        }
+    } else {
+        println!(
+            "Global mode: skipping project-local AGENTS.md (use without --global in a project)."
+        );
+    }
+
+    println!();
+    println!(
+        "Setup complete. All Pi tools (bash, read, grep, find, ls) now route through lean-ctx."
+    );
+    println!("Use /lean-ctx in Pi to verify the binary path.");
 }
 
 fn write_file(path: &PathBuf, content: &str) {
@@ -371,3 +490,53 @@ fn make_executable(path: &PathBuf) {
 
 #[cfg(not(unix))]
 fn make_executable(_path: &PathBuf) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bash_path_unix_unchanged() {
+        assert_eq!(
+            to_bash_compatible_path("/usr/local/bin/lean-ctx"),
+            "/usr/local/bin/lean-ctx"
+        );
+    }
+
+    #[test]
+    fn bash_path_home_unchanged() {
+        assert_eq!(
+            to_bash_compatible_path("/home/user/.cargo/bin/lean-ctx"),
+            "/home/user/.cargo/bin/lean-ctx"
+        );
+    }
+
+    #[test]
+    fn bash_path_windows_drive_converted() {
+        assert_eq!(
+            to_bash_compatible_path("C:\\Users\\Fraser\\bin\\lean-ctx.exe"),
+            "/c/Users/Fraser/bin/lean-ctx.exe"
+        );
+    }
+
+    #[test]
+    fn bash_path_windows_lowercase_drive() {
+        assert_eq!(
+            to_bash_compatible_path("D:\\tools\\lean-ctx.exe"),
+            "/d/tools/lean-ctx.exe"
+        );
+    }
+
+    #[test]
+    fn bash_path_windows_forward_slashes() {
+        assert_eq!(
+            to_bash_compatible_path("C:/Users/Fraser/bin/lean-ctx.exe"),
+            "/c/Users/Fraser/bin/lean-ctx.exe"
+        );
+    }
+
+    #[test]
+    fn bash_path_bare_name_unchanged() {
+        assert_eq!(to_bash_compatible_path("lean-ctx"), "lean-ctx");
+    }
+}

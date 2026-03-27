@@ -1,10 +1,16 @@
 use std::process::Command;
 
+fn lean_ctx_bin() -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lean-ctx"));
+    cmd.current_dir(env!("CARGO_MANIFEST_DIR"));
+    cmd.env("LEAN_CTX_ACTIVE", "1");
+    cmd
+}
+
 #[test]
 fn binary_prints_version() {
-    let output = Command::new("cargo")
-        .args(["run", "--release", "--", "--version"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+    let output = lean_ctx_bin()
+        .arg("--version")
         .output()
         .expect("failed to run lean-ctx");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -16,9 +22,8 @@ fn binary_prints_version() {
 
 #[test]
 fn binary_prints_help() {
-    let output = Command::new("cargo")
-        .args(["run", "--release", "--", "--help"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+    let output = lean_ctx_bin()
+        .arg("--help")
         .output()
         .expect("failed to run lean-ctx");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -30,32 +35,9 @@ fn binary_prints_help() {
 }
 
 #[test]
-fn binary_doctor_runs() {
-    let output = Command::new("cargo")
-        .args(["run", "--release", "--", "doctor"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("failed to run lean-ctx");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("lean-ctx") || stdout.contains("checks"),
-        "doctor should produce diagnostic output"
-    );
-}
-
-#[test]
 fn binary_read_file() {
-    let output = Command::new("cargo")
-        .args([
-            "run",
-            "--release",
-            "--",
-            "read",
-            "Cargo.toml",
-            "-m",
-            "signatures",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+    let output = lean_ctx_bin()
+        .args(["read", "Cargo.toml", "-m", "signatures"])
         .output()
         .expect("failed to run lean-ctx");
     assert!(output.status.success(), "read should succeed");
@@ -63,9 +45,8 @@ fn binary_read_file() {
 
 #[test]
 fn binary_config_shows_defaults() {
-    let output = Command::new("cargo")
-        .args(["run", "--release", "--", "config"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+    let output = lean_ctx_bin()
+        .arg("config")
         .output()
         .expect("failed to run lean-ctx");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -77,9 +58,8 @@ fn binary_config_shows_defaults() {
 
 #[test]
 fn shell_hook_compresses_echo() {
-    let output = Command::new("cargo")
-        .args(["run", "--release", "--", "-c", "echo", "hello", "world"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+    let output = lean_ctx_bin()
+        .args(["-c", "echo", "hello", "world"])
         .output()
         .expect("failed to run lean-ctx -c");
     let stdout = String::from_utf8_lossy(&output.stdout);

@@ -8,6 +8,7 @@ use crate::core::compressor;
 use crate::core::deps;
 use crate::core::entropy;
 use crate::core::preservation;
+use crate::core::quality;
 use crate::core::signatures;
 use crate::core::tokens::count_tokens;
 
@@ -246,7 +247,7 @@ fn measure_mode(content: &str, ext: &str, mode: &str, raw_tokens: usize) -> Mode
         }
         "aggressive" => compressor::aggressive_compress(content, Some(ext)),
         "entropy" => entropy::entropy_compress(content).output,
-        "cache_hit" => "[cached] re-read ~13tok".to_string(),
+        "cache_hit" => "cached re-read ~13tok".to_string(),
         _ => content.to_string(),
     };
 
@@ -727,6 +728,113 @@ pub fn format_json(b: &ProjectBenchmark) -> String {
     });
 
     serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
+}
+
+// ── CEP A/B Benchmark ──────────────────────────────────────
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct CepComparison {
+    pub mode: String,
+    pub tokens_without_cep: usize,
+    pub tokens_with_cep: usize,
+    pub quality_score: f64,
+    pub quality_passed: bool,
+}
+
+#[allow(dead_code)]
+pub fn run_cep_comparison(path: &str) -> Vec<CepComparison> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("rs");
+
+    let raw_tokens = count_tokens(&content);
+    if raw_tokens == 0 {
+        return Vec::new();
+    }
+
+    let modes = ["map", "signatures", "aggressive", "entropy"];
+    let mut comparisons = Vec::new();
+
+    for mode in &modes {
+        let measurement = measure_mode(&content, ext, mode, raw_tokens);
+
+        let compressed = match *mode {
+            "aggressive" => compressor::aggressive_compress(&content, Some(ext)),
+            "entropy" => entropy::entropy_compress(&content).output,
+            "signatures" => signatures::extract_signatures(&content, ext)
+                .iter()
+                .map(|s| s.to_compact())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => {
+                let dep_info = deps::extract_deps(&content, ext);
+                let sigs = signatures::extract_signatures(&content, ext);
+                let mut parts = Vec::new();
+                if !dep_info.imports.is_empty() {
+                    parts.push(dep_info.imports.join(","));
+                }
+                let key_sigs: Vec<String> = sigs
+                    .iter()
+                    .filter(|s| s.is_exported || s.indent == 0)
+                    .map(|s| s.to_compact())
+                    .collect();
+                if !key_sigs.is_empty() {
+                    parts.push(key_sigs.join("\n"));
+                }
+                parts.join("\n")
+            }
+        };
+
+        let q = quality::score(&content, &compressed, ext);
+        let cep_overhead = 5;
+        let tokens_with_cep = measurement.tokens + cep_overhead;
+
+        comparisons.push(CepComparison {
+            mode: mode.to_string(),
+            tokens_without_cep: measurement.tokens,
+            tokens_with_cep,
+            quality_score: q.composite,
+            quality_passed: q.passed,
+        });
+    }
+
+    comparisons
+}
+
+#[allow(dead_code)]
+pub fn format_cep_comparison(comparisons: &[CepComparison], path: &str) -> String {
+    let mut out = Vec::new();
+    let short = crate::core::protocol::shorten_path(path);
+
+    out.push(format!("CEP A/B Benchmark — {short}"));
+    out.push("═".repeat(60));
+    out.push(format!(
+        "{:<14} {:>8} {:>8} {:>8} {:>6}",
+        "Mode", "Without", "With CEP", "Quality", "Pass"
+    ));
+    out.push("─".repeat(60));
+
+    for c in comparisons {
+        let pass = if c.quality_passed { "✓" } else { "✗" };
+        out.push(format!(
+            "{:<14} {:>8} {:>8} {:>7.0}% {:>6}",
+            c.mode,
+            format_num(c.tokens_without_cep),
+            format_num(c.tokens_with_cep),
+            c.quality_score * 100.0,
+            pass,
+        ));
+    }
+
+    out.push("═".repeat(60));
+    out.join("\n")
 }
 
 // ── Helpers ─────────────────────────────────────────────────

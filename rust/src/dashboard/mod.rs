@@ -79,6 +79,13 @@ async fn handle_request(mut stream: tokio::net::TcpStream) {
             let json = serde_json::to_string(&store).unwrap_or_else(|_| "{}".to_string());
             ("200 OK", "application/json", json)
         }
+        "/api/mcp" => {
+            let mcp_path = dirs::home_dir()
+                .map(|h| h.join(".lean-ctx").join("mcp-live.json"))
+                .unwrap_or_default();
+            let json = std::fs::read_to_string(&mcp_path).unwrap_or_else(|_| "{}".to_string());
+            ("200 OK", "application/json", json)
+        }
         "/" | "/index.html" => (
             "200 OK",
             "text/html; charset=utf-8",
@@ -88,10 +95,17 @@ async fn handle_request(mut stream: tokio::net::TcpStream) {
         _ => ("404 Not Found", "text/plain", "Not Found".to_string()),
     };
 
+    let cache_header = if content_type.starts_with("application/json") {
+        "Cache-Control: no-cache, no-store, must-revalidate\r\nPragma: no-cache\r\n"
+    } else {
+        ""
+    };
+
     let response = format!(
         "HTTP/1.1 {status}\r\n\
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
+         {cache_header}\
          Access-Control-Allow-Origin: *\r\n\
          Connection: close\r\n\
          \r\n\

@@ -47,6 +47,7 @@ fn resolve_lean_ctx_binary() -> Option<PathBuf> {
         let output = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg("command -v lean-ctx")
+            .env("LEAN_CTX_ACTIVE", "1")
             .output()
             .ok()?;
         if !output.status.success() {
@@ -64,6 +65,7 @@ fn resolve_lean_ctx_binary() -> Option<PathBuf> {
     {
         let output = std::process::Command::new("where.exe")
             .arg("lean-ctx")
+            .env("LEAN_CTX_ACTIVE", "1")
             .output()
             .ok()?;
         if !output.status.success() {
@@ -84,8 +86,11 @@ fn resolve_lean_ctx_binary() -> Option<PathBuf> {
 }
 
 fn lean_ctx_version_from_path() -> Outcome {
-    let output = match std::process::Command::new("lean-ctx")
+    let bin = resolve_lean_ctx_binary()
+        .unwrap_or_else(|| std::env::current_exe().unwrap_or_else(|_| "lean-ctx".into()));
+    let output = match std::process::Command::new(&bin)
         .args(["--version"])
+        .env("LEAN_CTX_ACTIVE", "1")
         .output()
     {
         Ok(o) => o,

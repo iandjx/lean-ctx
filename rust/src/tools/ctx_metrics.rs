@@ -215,7 +215,71 @@ pub fn handle(cache: &SessionCache, tool_calls: &[ToolCallRecord], crp_mode: Crp
         }
     }
 
+    let cep = compute_cep_compliance(cache, tool_calls);
+    out.push(String::new());
+    if crp_mode.is_tdd() {
+        out.push("§CEP compliance".to_string());
+    } else {
+        out.push("CEP Compliance:".to_string());
+    }
+    out.push(format!(
+        "  Cache utilization: {:.0}%  (hit rate for repeated files)",
+        cep.cache_utilization * 100.0
+    ));
+    out.push(format!(
+        "  Mode diversity:    {:.0}%  (using optimal modes per file)",
+        cep.mode_diversity * 100.0
+    ));
+    out.push(format!(
+        "  Compression rate:  {:.0}%  (overall token reduction)",
+        cep.compression_rate * 100.0
+    ));
+    out.push(format!(
+        "  CEP Score:         {:.0}/100",
+        cep.overall_score * 100.0
+    ));
+
+    let complexity = crate::core::adaptive::classify_from_context(cache);
+    out.push(format!("  Task complexity:   {:?}", complexity));
+
     out.join("\n")
+}
+
+struct CepCompliance {
+    cache_utilization: f64,
+    mode_diversity: f64,
+    compression_rate: f64,
+    overall_score: f64,
+}
+
+fn compute_cep_compliance(cache: &SessionCache, tool_calls: &[ToolCallRecord]) -> CepCompliance {
+    let stats = cache.get_stats();
+
+    let cache_utilization = stats.hit_rate() / 100.0;
+
+    let modes_used: std::collections::HashSet<&str> = tool_calls
+        .iter()
+        .filter_map(|c| c.mode.as_deref())
+        .collect();
+    let possible_modes = 6.0; // full, map, signatures, aggressive, entropy, cache_hit
+    let mode_diversity = (modes_used.len() as f64 / possible_modes).min(1.0);
+
+    let total_original: u64 = tool_calls.iter().map(|c| c.original_tokens as u64).sum();
+    let total_saved: u64 = tool_calls.iter().map(|c| c.saved_tokens as u64).sum();
+    let compression_rate = if total_original > 0 {
+        total_saved as f64 / total_original as f64
+    } else {
+        0.0
+    };
+
+    let overall_score = cache_utilization * 0.3 + mode_diversity * 0.2 + compression_rate * 0.5;
+
+    CepCompliance {
+        cache_utilization,
+        mode_diversity,
+        compression_rate,
+        overall_score,
+    }
 }
 
 fn format_tokens(n: u64) -> String {
@@ -239,4 +303,58 @@ struct ToolStats {
 struct ModeStats {
     calls: u32,
     saved: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cep_compliance_section_present_tdd() {
+        let cache = SessionCache::new();
+        let calls = vec![ToolCallRecord {
+            tool: "ctx_read".to_string(),
+            original_tokens: 1000,
+            saved_tokens: 300,
+            mode: Some("full".to_string()),
+        }];
+        let output = handle(&cache, &calls, CrpMode::Tdd);
+        assert!(
+            output.contains("§CEP compliance"),
+            "TDD output must contain CEP compliance section"
+        );
+        assert!(output.contains("Cache utilization:"));
+        assert!(output.contains("Mode diversity:"));
+        assert!(output.contains("Compression rate:"));
+        assert!(output.contains("CEP Score:"));
+        assert!(output.contains("Task complexity:"));
+    }
+
+    #[test]
+    fn test_cep_compliance_section_present_normal() {
+        let cache = SessionCache::new();
+        let calls = vec![];
+        let output = handle(&cache, &calls, CrpMode::Off);
+        assert!(
+            output.contains("CEP Compliance:"),
+            "Normal output must contain CEP Compliance section"
+        );
+        assert!(output.contains("Task complexity:"));
+    }
+
+    #[test]
+    fn test_cep_scores_zero_with_no_calls() {
+        let cache = SessionCache::new();
+        let calls = vec![];
+        let output = handle(&cache, &calls, CrpMode::Tdd);
+        assert!(output.contains("CEP Score:         0/100"));
+        assert!(output.contains("Cache utilization: 0%"));
+    }
+
+    #[test]
+    fn test_format_tokens_units() {
+        assert_eq!(format_tokens(500), "500");
+        assert_eq!(format_tokens(1500), "1.5K");
+        assert_eq!(format_tokens(1_500_000), "1.5M");
+    }
 }

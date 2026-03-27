@@ -15,7 +15,7 @@ impl ServerHandler for LeanCtxServer {
         let instructions = build_instructions(self.crp_mode);
 
         InitializeResult::new(capabilities)
-            .with_server_info(Implementation::new("lean-ctx", "2.1.1"))
+            .with_server_info(Implementation::new("lean-ctx", "2.3.3"))
             .with_instructions(instructions)
     }
 
@@ -103,14 +103,16 @@ impl ServerHandler for LeanCtxServer {
                     tool_def(
                         "ctx_search",
                         "REPLACES built-in Grep tool — ALWAYS use this instead of Grep. \
-                        Search files for a regex pattern. Returns only matching lines with compact context.",
+                        Search files for a regex pattern. Respects .gitignore by default. \
+                        Returns only matching lines with compact context.",
                         json!({
                             "type": "object",
                             "properties": {
                                 "pattern": { "type": "string", "description": "Regex pattern" },
                                 "path": { "type": "string", "description": "Directory to search" },
                                 "ext": { "type": "string", "description": "File extension filter" },
-                                "max_results": { "type": "integer", "description": "Max results (default: 20)" }
+                                "max_results": { "type": "integer", "description": "Max results (default: 20)" },
+                                "ignore_gitignore": { "type": "boolean", "description": "Set true to scan ALL files including .gitignore'd paths (default: false)" }
                             },
                             "required": ["pattern"]
                         }),
@@ -220,11 +222,18 @@ impl ServerHandler for LeanCtxServer {
                     ),
                     tool_def(
                         "ctx_dedup",
-                        "Cross-file deduplication analysis. Finds shared imports, boilerplate blocks, \
-                        and repeated patterns across all cached files. Reports potential token savings.",
+                        "Cross-file deduplication analysis and active dedup. Finds shared imports, boilerplate blocks, \
+                        and repeated patterns across all cached files. Use action=apply to register shared blocks \
+                        so subsequent ctx_read calls auto-replace duplicates with cross-file references.",
                         json!({
                             "type": "object",
-                            "properties": {}
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "description": "analyze (default) or apply (register shared blocks for auto-dedup in ctx_read)",
+                                    "default": "analyze"
+                                }
+                            }
                         }),
                     ),
                     tool_def(
@@ -565,9 +574,27 @@ impl ServerHandler for LeanCtxServer {
                     "ctx_read",
                     original,
                     original.saturating_sub(tokens),
-                    Some(mode),
+                    Some(mode.clone()),
                 )
                 .await;
+                {
+                    let sig =
+                        crate::core::mode_predictor::FileSignature::from_path(&path, original);
+                    let density = if tokens > 0 {
+                        original as f64 / tokens as f64
+                    } else {
+                        1.0
+                    };
+                    let outcome = crate::core::mode_predictor::ModeOutcome {
+                        mode,
+                        tokens_in: original,
+                        tokens_out: tokens,
+                        density: density.min(1.0),
+                    };
+                    let mut predictor = crate::core::mode_predictor::ModePredictor::new();
+                    predictor.record(sig, outcome);
+                    predictor.save();
+                }
                 output
             }
             "ctx_multi_read" => {
@@ -619,12 +646,14 @@ impl ServerHandler for LeanCtxServer {
                 let path = get_str(args, "path").unwrap_or_else(|| ".".to_string());
                 let ext = get_str(args, "ext");
                 let max = get_int(args, "max_results").unwrap_or(20) as usize;
+                let no_gitignore = get_bool(args, "ignore_gitignore").unwrap_or(false);
                 let result = crate::tools::ctx_search::handle(
                     &pattern,
                     &path,
                     ext.as_deref(),
                     max,
                     self.crp_mode,
+                    !no_gitignore,
                 );
                 let sent = crate::core::tokens::count_tokens(&result);
                 self.record_call("ctx_search", sent, 0, None).await;
@@ -719,11 +748,20 @@ impl ServerHandler for LeanCtxServer {
                 output
             }
             "ctx_dedup" => {
-                let cache = self.cache.read().await;
-                let result = crate::tools::ctx_dedup::handle(&cache);
-                drop(cache);
-                self.record_call("ctx_dedup", 0, 0, None).await;
-                result
+                let action = get_str(args, "action").unwrap_or_default();
+                if action == "apply" {
+                    let mut cache = self.cache.write().await;
+                    let result = crate::tools::ctx_dedup::handle_action(&mut cache, &action);
+                    drop(cache);
+                    self.record_call("ctx_dedup", 0, 0, None).await;
+                    result
+                } else {
+                    let cache = self.cache.read().await;
+                    let result = crate::tools::ctx_dedup::handle(&cache);
+                    drop(cache);
+                    self.record_call("ctx_dedup", 0, 0, None).await;
+                    result
+                }
             }
             "ctx_fill" => {
                 let paths = get_str_array(args, "paths")
@@ -1039,12 +1077,17 @@ impl ServerHandler for LeanCtxServer {
 }
 
 fn build_instructions(crp_mode: CrpMode) -> String {
+    build_instructions_with_client(crp_mode, "")
+}
+
+fn build_instructions_with_client(crp_mode: CrpMode, client_name: &str) -> String {
+    let profile = crate::core::litm::LitmProfile::from_client_name(client_name);
     let session_block = match crate::core::session::SessionState::load_latest() {
         Some(session) => {
             let positioned = crate::core::litm::position_optimize(&session);
             format!(
-                "\n\n--- ACTIVE SESSION (LITM P1: begin position) ---\n{}\n---\n",
-                positioned.begin_block
+                "\n\n--- ACTIVE SESSION (LITM P1: begin position, profile: {}) ---\n{}\n---\n",
+                profile.name, positioned.begin_block
             )
         }
         None => String::new(),
@@ -1102,7 +1145,28 @@ DUAL-GRAPH (if .dual-graph/ exists):\n\
 • graph_register_edit(files) — record edits for future retrieval\n\
 • fallback_rg(pattern) — controlled grep (respect confidence caps)\n\
 • graph_impact(file) — show dependency blast radius\n\
-If graph_continue returns confidence=high, stop exploring. Respect max_supplementary_greps/files caps.");
+If graph_continue returns confidence=high, stop exploring. Respect max_supplementary_greps/files caps.\n\
+\n\
+COMMUNICATION PROTOCOL (Cognitive Efficiency Protocol v1):\n\
+1. ACT FIRST — Execute tool calls immediately. Never narrate before acting.\n\
+   Bad:  \"Let me read the file to understand the issue...\" [tool call]\n\
+   Good: [tool call] then one-line summary of finding\n\
+2. DELTA ONLY — Never repeat known context. Reference cached files by Fn ID.\n\
+   Bad:  \"The file auth.ts contains a function validateToken that...\"\n\
+   Good: \"F3:42 validateToken — expiry check uses wrong clock\"\n\
+3. STRUCTURED OVER PROSE — Use notation, not sentences.\n\
+   Changes: +line / -line / ~line (modified)\n\
+   Status:  tool(args) → result\n\
+   Errors:  ERR path:line — message\n\
+4. ONE LINE PER ACTION — Summarize, don't explain.\n\
+   Bad:  \"I've successfully applied the edit to fix the token validation...\"\n\
+   Good: \"Fixed F3:42 — was comparing UTC vs local timestamp\"\n\
+5. QUALITY ANCHOR — NEVER skip edge case analysis or error handling to save tokens.\n\
+   Complex tasks require full reasoning. Only reduce prose, never reduce thinking.\n\
+\n\
+{decoder_block}",
+        decoder_block = crate::core::protocol::instruction_decoder_block()
+    );
 
     match crp_mode {
         CrpMode::Off => base,
@@ -1112,10 +1176,11 @@ If graph_continue returns confidence=high, stop exploring. Respect max_supplemen
                 CRP MODE: compact\n\
                 Respond using Compact Response Protocol:\n\
                 • Omit filler words, articles, and redundant phrases\n\
-                • Use symbol shorthand: → (returns/leads to), ∴ (therefore), ≈ (approximately), ✓ (done/ok), ✗ (error/fail)\n\
-                • Abbreviate common terms: fn (function), cfg (config), impl (implementation), deps (dependencies)\n\
+                • Use symbol shorthand: → ∴ ≈ ✓ ✗\n\
+                • Abbreviate: fn, cfg, impl, deps, req, res, ctx, err, ok, ret, arg, val, ty, mod\n\
                 • Use compact lists instead of prose\n\
-                • Prefer code blocks over natural language explanations"
+                • Prefer code blocks over natural language explanations\n\
+                • For code changes: show only diff lines (+/-), not full files"
             )
         }
         CrpMode::Tdd => {
@@ -1125,15 +1190,26 @@ If graph_continue returns confidence=high, stop exploring. Respect max_supplemen
                 CRITICAL: Maximize information density. Every token must carry meaning.\n\
                 \n\
                 RESPONSE RULES:\n\
-                • Use symbol shorthand everywhere: → ∴ ≈ ✓ ✗ λ ∂ § ¿\n\
-                • λ=function/handler, ∂=change/delta, §=section/module, ¿=check/verify\n\
                 • Drop all articles (a, the, an), filler words, and pleasantries\n\
-                • Compress identifiers: use short IDs from symbol table when provided\n\
                 • Reference files by Fn refs only, never full paths\n\
-                • Use tabular format for structured data\n\
-                • Abbreviations: fn, cfg, impl, deps, req, res, ctx, err, ok, ret, arg, val, ty, mod\n\
                 • For code changes: show only diff lines, not full files\n\
                 • No explanations unless asked — just show the solution\n\
+                • Use tabular format for structured data\n\
+                • Abbreviations: fn, cfg, impl, deps, req, res, ctx, err, ok, ret, arg, val, ty, mod\n\
+                \n\
+                SYMBOLS (each = 1 token, replaces 5-10 tokens of prose):\n\
+                Structural: λ=function  §=module/struct  ∂=interface/trait  τ=type  ε=enum\n\
+                Actions:    ⊕=add  ⊖=remove  ∆=modify  →=returns  ⇒=implies\n\
+                Status:     ✓=ok  ✗=fail  ⚠=warning\n\
+                \n\
+                CHANGE NOTATION (use for all code modifications):\n\
+                ⊕F1:42 param(timeout:Duration)     — added parameter\n\
+                ⊖F1:10-15                           — removed lines\n\
+                ∆F1:42 validate_token → verify_jwt  — renamed/refactored\n\
+                \n\
+                STATUS NOTATION:\n\
+                ctx_read(F1) → 808L cached ✓\n\
+                cargo test → 82 passed ✓ 0 failed\n\
                 \n\
                 SYMBOL TABLE: Tool outputs include a §MAP section mapping long identifiers to short IDs.\n\
                 Use these short IDs in all subsequent references."

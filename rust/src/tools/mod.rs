@@ -84,6 +84,12 @@ pub struct ToolCallRecord {
     pub mode: Option<String>,
 }
 
+impl Default for LeanCtxServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LeanCtxServer {
     pub fn new() -> Self {
         let config = crate::core::config::Config::load();
@@ -167,6 +173,10 @@ impl LeanCtxServer {
         if session.should_save() {
             let _ = session.save();
         }
+        drop(calls);
+        drop(session);
+
+        self.write_mcp_live_stats().await;
     }
 
     pub fn increment_and_check(&self) -> bool {
@@ -179,6 +189,7 @@ impl LeanCtxServer {
         if cache.get_all_entries().is_empty() {
             return None;
         }
+        let complexity = crate::core::adaptive::classify_from_context(&cache);
         let checkpoint = ctx_compress::handle(&cache, true, self.crp_mode);
         drop(cache);
 
@@ -189,9 +200,82 @@ impl LeanCtxServer {
 
         self.record_call("ctx_compress", 0, 0, Some("auto".to_string()))
             .await;
+
+        self.write_mcp_live_stats().await;
+
         Some(format!(
-            "{checkpoint}\n\n--- SESSION STATE ---\n{session_summary}"
+            "{checkpoint}\n\n--- SESSION STATE ---\n{session_summary}\n\n{}",
+            complexity.instruction_suffix()
         ))
+    }
+
+    async fn write_mcp_live_stats(&self) {
+        let cache = self.cache.read().await;
+        let calls = self.tool_calls.read().await;
+        let stats = cache.get_stats();
+        let complexity = crate::core::adaptive::classify_from_context(&cache);
+
+        let total_original: u64 = calls.iter().map(|c| c.original_tokens as u64).sum();
+        let total_saved: u64 = calls.iter().map(|c| c.saved_tokens as u64).sum();
+        let total_compressed = total_original.saturating_sub(total_saved);
+        let compression_rate = if total_original > 0 {
+            total_saved as f64 / total_original as f64
+        } else {
+            0.0
+        };
+
+        let modes_used: std::collections::HashSet<&str> =
+            calls.iter().filter_map(|c| c.mode.as_deref()).collect();
+        let mode_diversity = (modes_used.len() as f64 / 6.0).min(1.0);
+        let cache_util = stats.hit_rate() / 100.0;
+        let cep_score = cache_util * 0.3 + mode_diversity * 0.2 + compression_rate * 0.5;
+        let cep_score_u32 = (cep_score * 100.0).round() as u32;
+
+        let live = serde_json::json!({
+            "cep_score": cep_score_u32,
+            "cache_utilization": (cache_util * 100.0).round() as u32,
+            "mode_diversity": (mode_diversity * 100.0).round() as u32,
+            "compression_rate": (compression_rate * 100.0).round() as u32,
+            "task_complexity": format!("{:?}", complexity),
+            "files_cached": stats.files_tracked,
+            "total_reads": stats.total_reads,
+            "cache_hits": stats.cache_hits,
+            "tokens_saved": total_saved,
+            "tokens_original": total_original,
+            "tool_calls": calls.len(),
+            "updated_at": chrono::Local::now().to_rfc3339(),
+        });
+
+        let mut mode_counts: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        for call in calls.iter() {
+            if let Some(ref mode) = call.mode {
+                *mode_counts.entry(mode.clone()).or_insert(0) += 1;
+            }
+        }
+
+        let tool_call_count = calls.len() as u64;
+        let complexity_str = format!("{:?}", complexity);
+        let cache_hits = stats.cache_hits;
+        let total_reads = stats.total_reads;
+
+        drop(cache);
+        drop(calls);
+
+        if let Some(dir) = dirs::home_dir().map(|h| h.join(".lean-ctx")) {
+            let _ = std::fs::write(dir.join("mcp-live.json"), live.to_string());
+        }
+
+        crate::core::stats::record_cep_session(
+            cep_score_u32,
+            cache_hits,
+            total_reads,
+            total_original,
+            total_compressed,
+            &mode_counts,
+            tool_call_count,
+            &complexity_str,
+        );
     }
 }
 

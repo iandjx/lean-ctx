@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-install.sh}")" 2>/dev/null && pwd
 RUST_DIR="$SCRIPT_DIR/rust"
 BIN_DIR="$SCRIPT_DIR/bin"
 INSTALL_DIR="$HOME/.local/bin"
-REPO="yvgude/lean-ctx"
+REPO="iandjx/lean-ctx"
 
 echo "LeanCTX Installer"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

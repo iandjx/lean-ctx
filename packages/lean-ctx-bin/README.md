@@ -1,6 +1,6 @@
 # lean-ctx-bin
 
-[lean-ctx](https://github.com/yvgude/lean-ctx) distributed as an npm package — **no Rust required**.
+[lean-ctx](https://github.com/iandjx/lean-ctx) distributed as an npm package — **no Rust required**.
 
 Downloads the correct pre-built binary for your platform on install.
 
@@ -22,7 +22,7 @@ lean-ctx --version
 Or with the `lctx` launcher (Claude Code integration):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yvgude/lean-ctx/main/install.sh | bash -s -- --download
+curl -fsSL https://raw.githubusercontent.com/iandjx/lean-ctx/main/install.sh | bash -s -- --download
 lctx ~/your-project
 ```
 
@@ -38,4 +38,4 @@ lctx ~/your-project
 
 ## Source
 
-https://github.com/yvgude/lean-ctx
+https://github.com/iandjx/lean-ctx

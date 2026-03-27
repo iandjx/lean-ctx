@@ -9,7 +9,7 @@ const path = require("path");
 const { execSync } = require("child_process");
 const zlib = require("zlib");
 
-const REPO = "yvgude/lean-ctx";
+const REPO = "iandjx/lean-ctx";
 const BIN_DIR = path.join(__dirname, "bin");
 const BIN_PATH = path.join(BIN_DIR, process.platform === "win32" ? "lean-ctx.exe" : "lean-ctx");
 

@@ -157,6 +157,13 @@ pub fn graph_retrieve(
                 score += 2.0;
             }
 
+            // +3.0 per keyword match in node.docs (doc comments — highest weight)
+            if let Some(ref docs) = node.docs {
+                if docs.to_lowercase().contains(&kw_lower) {
+                    score += 3.0;
+                }
+            }
+
             // +1.5 per keyword match in node.summary
             if let Some(ref summary) = node.summary {
                 if summary.to_lowercase().contains(&kw_lower) {
@@ -677,6 +684,47 @@ mod tests {
     fn impact_no_graph() {
         let result = graph_impact(None, "src/auth.rs");
         assert!(result.contains("No project scanned"));
+    }
+
+    #[test]
+    fn docs_field_scores_higher_than_content() {
+        use crate::graph::types::GraphNode;
+        let graph_with_docs = crate::graph::types::InfoGraph {
+            root: "/tmp".to_string(),
+            node_count: 2,
+            edge_count: 0,
+            file_count: 5,
+            symbol_count: 0,
+            nodes: vec![
+                GraphNode {
+                    id: "src/auth.rs".to_string(),
+                    kind: "file".to_string(),
+                    path: "src/auth.rs".to_string(),
+                    keywords: vec![],
+                    docs: Some("Authenticate users with JWT tokens".to_string()),
+                    content: None,
+                    summary: None,
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: "src/db.rs".to_string(),
+                    kind: "file".to_string(),
+                    path: "src/db.rs".to_string(),
+                    keywords: vec![],
+                    docs: None,
+                    content: Some("JWT token".to_string()), // same keyword in content only
+                    summary: None,
+                    ..Default::default()
+                },
+            ],
+            edges: vec![],
+        };
+        let kw = extract_keywords("JWT authentication");
+        let (files, _) = graph_retrieve(&graph_with_docs, &kw, &[]);
+        // auth.rs has docs match (score 3.0) vs db.rs content match (score 1.0)
+        // auth.rs should rank first
+        assert!(!files.is_empty());
+        assert!(files[0].contains("auth"), "documented file should rank first");
     }
 
     #[test]

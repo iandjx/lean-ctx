@@ -62,6 +62,9 @@ pub struct GraphNode {
     pub confidence: Option<String>,
     #[serde(default)]
     pub exported: Option<bool>,
+    /// Extracted doc comments / docstrings for this node (high-weight retrieval field).
+    #[serde(default)]
+    pub docs: Option<String>,
 }
 
 /// An edge connecting two nodes. `rel` is the relationship type:

@@ -169,6 +169,7 @@ pub fn scan(project_root: &str) -> (InfoGraph, SymbolIndex) {
         // Build file node (new or changed file)
         let keywords = extract_keywords(&rel_path, &content);
         let summary = extract_summary(&content);
+        let docs = extract_docs(&content);
 
         let file_node = GraphNode {
             id: rel_path.clone(),
@@ -184,6 +185,7 @@ pub fn scan(project_root: &str) -> (InfoGraph, SymbolIndex) {
             },
             summary: Some(summary),
             file_hash: Some(hash),
+            docs,
             ..Default::default()
         };
         nodes.push(file_node);
@@ -416,6 +418,39 @@ fn resolve_import(import: &str, from_file: &str) -> String {
     import.to_string()
 }
 
+/// Extract doc comments from file content.
+/// Supports ///, /**, #, and """ style doc comments.
+/// Returns the concatenated doc strings (up to 500 chars).
+fn extract_docs(content: &str) -> Option<String> {
+    let mut doc_lines: Vec<&str> = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("///")
+            || trimmed.starts_with("//!")
+            || trimmed.starts_with("/**")
+            || trimmed.starts_with("* ")
+            || (trimmed.starts_with('#') && !trimmed.starts_with("#!") && !trimmed.starts_with("#["))
+        {
+            let clean = trimmed
+                .trim_start_matches("///")
+                .trim_start_matches("//!")
+                .trim_start_matches("/**")
+                .trim_start_matches("* ")
+                .trim_start_matches("# ")
+                .trim_start_matches('#')
+                .trim();
+            if !clean.is_empty() {
+                doc_lines.push(clean);
+            }
+        }
+    }
+    if doc_lines.is_empty() {
+        return None;
+    }
+    let joined = doc_lines.join(" ");
+    Some(if joined.len() > 500 { joined[..500].to_string() } else { joined })
+}
+
 /// Extract function call edges from a file's content.
 /// Returns a list of (caller_symbol_id, callee_name) pairs.
 /// Uses simple pattern matching — not a full AST walk.
@@ -627,6 +662,30 @@ mod tests {
             resolve_import("lodash", "src/app.ts"),
             "lodash"
         );
+    }
+
+    #[test]
+    fn extract_docs_rust_triple_slash() {
+        let content = "/// Authenticate a user with JWT token\n/// Returns true if valid\npub fn authenticate(token: &str) -> bool { true }\n";
+        let docs = extract_docs(content);
+        assert!(docs.is_some());
+        let d = docs.unwrap();
+        assert!(d.contains("Authenticate"));
+        assert!(d.contains("JWT"));
+    }
+
+    #[test]
+    fn extract_docs_python_hash() {
+        let content = "# Check if user is authorized\n# Returns boolean\ndef is_authorized(user): pass\n";
+        let docs = extract_docs(content);
+        assert!(docs.is_some());
+        assert!(docs.unwrap().contains("authorized"));
+    }
+
+    #[test]
+    fn extract_docs_empty_for_undocumented() {
+        let content = "fn foo() { let x = 1; }\n";
+        assert!(extract_docs(content).is_none());
     }
 
     #[test]

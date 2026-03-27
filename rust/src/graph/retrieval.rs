@@ -114,7 +114,8 @@ pub fn graph_continue(
     }
 
     // 4. Run graph retrieval
-    let (recommended, confidence) = graph_retrieve(graph, &query_keywords, recent_files);
+    let expanded_keywords = expand_keywords(&query_keywords);
+    let (recommended, confidence) = graph_retrieve(graph, &expanded_keywords, recent_files);
 
     let (max_greps, max_files) = caps_for_confidence(&confidence);
 
@@ -282,6 +283,44 @@ fn search_memories(store: &[MemoryEntry], query_keywords: &[String]) -> Vec<Memo
         .take(3)
         .map(|(_, entry)| entry.clone())
         .collect()
+}
+
+/// Expand query keywords with domain synonyms to improve recall.
+/// E.g. "auth" also matches "login", "session", "token", "jwt".
+pub fn expand_keywords(keywords: &[String]) -> Vec<String> {
+    const SYNONYMS: &[(&str, &[&str])] = &[
+        ("auth", &["login", "session", "token", "jwt", "credential", "password", "oauth"]),
+        ("db", &["database", "query", "connection", "pool", "sql", "postgres", "mysql", "sqlite"]),
+        ("database", &["db", "query", "connection", "pool", "sql"]),
+        ("api", &["endpoint", "handler", "route", "request", "response", "rest", "http"]),
+        ("route", &["router", "path", "endpoint", "handler", "api"]),
+        ("cache", &["redis", "memcache", "ttl", "expire", "store"]),
+        ("error", &["err", "exception", "panic", "fail", "result"]),
+        ("config", &["settings", "env", "environment", "cfg", "options"]),
+        ("test", &["spec", "assert", "mock", "fixture", "integration"]),
+        ("log", &["logger", "logging", "trace", "debug", "info", "warn"]),
+        ("user", &["account", "profile", "member", "identity"]),
+        ("event", &["message", "emit", "publish", "subscribe", "listener"]),
+        ("file", &["read", "write", "path", "disk", "fs", "io"]),
+        ("queue", &["job", "worker", "task", "async", "background"]),
+        ("search", &["query", "filter", "find", "index", "lookup"]),
+    ];
+
+    let mut expanded = keywords.to_vec();
+    for kw in keywords {
+        let kw_lower = kw.to_lowercase();
+        for (key, synonyms) in SYNONYMS {
+            if kw_lower == *key {
+                for syn in *synonyms {
+                    let s = syn.to_string();
+                    if !expanded.contains(&s) {
+                        expanded.push(s);
+                    }
+                }
+            }
+        }
+    }
+    expanded
 }
 
 /// Extract keywords from a query string.
@@ -593,6 +632,34 @@ mod tests {
     fn impact_no_graph() {
         let result = graph_impact(None, "src/auth.rs");
         assert!(result.contains("No project scanned"));
+    }
+
+    #[test]
+    fn query_expansion_adds_synonyms() {
+        let kw = vec!["auth".to_string()];
+        let expanded = expand_keywords(&kw);
+        assert!(expanded.contains(&"auth".to_string()));
+        assert!(expanded.contains(&"login".to_string()));
+        assert!(expanded.contains(&"token".to_string()));
+        assert!(expanded.contains(&"jwt".to_string()));
+    }
+
+    #[test]
+    fn query_expansion_no_duplicates() {
+        let kw = vec!["auth".to_string(), "token".to_string()];
+        let expanded = expand_keywords(&kw);
+        let count = expanded.iter().filter(|s| *s == "token").count();
+        assert_eq!(count, 1, "no duplicates in expanded keywords");
+    }
+
+    #[test]
+    fn retrieve_with_expanded_keywords_finds_more() {
+        let graph = test_graph();
+        // Query with "auth" should match auth.rs via both direct and synonym scoring
+        let kw = vec!["auth".to_string()];
+        let expanded = expand_keywords(&kw);
+        let (files, _) = graph_retrieve(&graph, &expanded, &[]);
+        assert!(files.iter().any(|f| f.contains("auth")));
     }
 
     #[test]

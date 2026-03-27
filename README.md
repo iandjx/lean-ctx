@@ -2,8 +2,8 @@
 
 **Context Intelligence Engine with CEP + CCP + TDD. Shell Hook + MCP Server. 21 MCP tools, 90+ shell patterns, Cognitive Efficiency Protocol (CEP), cross-session memory (CCP), Token Dense Dialect (TDD), LITM-aware positioning, tree-sitter AST for 14 languages. Single Rust binary.**
 
-[![CI](https://github.com/yvgude/lean-ctx/actions/workflows/ci.yml/badge.svg)](https://github.com/yvgude/lean-ctx/actions/workflows/ci.yml)
-[![Security Check](https://github.com/yvgude/lean-ctx/actions/workflows/security-check.yml/badge.svg)](https://github.com/yvgude/lean-ctx/actions/workflows/security-check.yml)
+[![CI](https://github.com/iandjx/lean-ctx/actions/workflows/ci.yml/badge.svg)](https://github.com/iandjx/lean-ctx/actions/workflows/ci.yml)
+[![Security Check](https://github.com/iandjx/lean-ctx/actions/workflows/security-check.yml/badge.svg)](https://github.com/iandjx/lean-ctx/actions/workflows/security-check.yml)
 [![Crates.io](https://img.shields.io/crates/v/lean-ctx)](https://crates.io/crates/lean-ctx)
 [![Downloads](https://img.shields.io/crates/d/lean-ctx)](https://crates.io/crates/lean-ctx)
 [![AUR](https://img.shields.io/aur/version/lean-ctx)](https://aur.archlinux.org/packages/lean-ctx)
@@ -11,7 +11,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/pTHkG9Hew9)
 
-[Website](https://leanctx.com) · [Install](#installation) · [Quick Start](#quick-start) · [CLI Reference](#cli-commands) · [MCP Tools](#21-mcp-tools) · [Changelog](CHANGELOG.md) · [vs RTK](#lean-ctx-vs-rtk) · [Discord](https://discord.gg/pTHkG9Hew9)
+[Website](https://leanctx.com) · [Quick Install](#quick-install) · [Quick Start](#quick-start) · [CLI Reference](#cli-commands) · [MCP Tools](#21-mcp-tools) · [Changelog](CHANGELOG.md) · [vs RTK](#lean-ctx-vs-rtk) · [Discord](https://discord.gg/pTHkG9Hew9)
 
 ---
 
@@ -46,13 +46,57 @@ lean-ctx reduces LLM token consumption by **up to 99%** through three complement
 
 > Estimates based on medium-sized TypeScript/Rust projects. MCP cache hits reduce re-reads to ~13 tokens each.
 
-## Installation
+## Quick Install
 
-### Homebrew (macOS / Linux)
+**No Rust required** — pick the method that fits your setup:
+
+### Option 1 — curl one-liner (macOS / Linux)
 
 ```bash
-brew tap yvgude/lean-ctx
+curl -fsSL https://raw.githubusercontent.com/iandjx/lean-ctx/main/install.sh | bash -s -- --download
+```
+
+Downloads the pre-built binary for your platform, installs `lean-ctx` and the `lctx` launcher to `~/.local/bin`. Done in seconds.
+
+### Option 2 — npm (any OS with Node.js)
+
+```bash
+npm install -g lean-ctx-bin
+```
+
+Automatically detects your platform and downloads the right binary on install.
+
+### Option 3 — Homebrew (macOS / Linux)
+
+```bash
+brew tap iandjx/lean-ctx
 brew install lean-ctx
+```
+
+### Option 4 — Download manually
+
+Grab the binary for your platform from the [latest release](https://github.com/iandjx/lean-ctx/releases/latest):
+
+| Platform | File |
+|---|---|
+| macOS Apple Silicon | `lean-ctx-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `lean-ctx-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 | `lean-ctx-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `lean-ctx-aarch64-unknown-linux-gnu.tar.gz` |
+| Windows x86_64 | `lean-ctx-x86_64-pc-windows-msvc.zip` |
+
+Extract and place `lean-ctx` anywhere on your `PATH`.
+
+---
+
+## Installation (with Rust)
+
+If you have Rust installed:
+
+### Cargo
+
+```bash
+cargo install lean-ctx
 ```
 
 ### Arch Linux (AUR)
@@ -63,32 +107,27 @@ yay -S lean-ctx        # builds from source (crates.io)
 yay -S lean-ctx-bin    # pre-built binary (GitHub Releases)
 ```
 
-### Cargo
-
-```bash
-cargo install lean-ctx
-```
-
 ### Build from Source
 
 ```bash
-git clone https://github.com/yvgude/lean-ctx.git
-cd lean-ctx/rust
-cargo build --release
-cp target/release/lean-ctx ~/.local/bin/
+git clone https://github.com/iandjx/lean-ctx.git
+cd lean-ctx
+./install.sh           # build + symlink to ~/.local/bin
+```
+
+---
+
+### Verify Installation
+
+```bash
+lean-ctx --version   # Should show "lean-ctx 2.4.0"
+lean-ctx gain        # Should show token savings stats
 ```
 
 > Add `~/.local/bin` to your PATH if needed:
 > ```bash
 > echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc  # or ~/.bashrc
 > ```
-
-### Verify Installation
-
-```bash
-lean-ctx --version   # Should show "lean-ctx 2.3.3"
-lean-ctx gain        # Should show token savings stats
-```
 
 ## Token Dense Dialect (TDD)
 
@@ -730,7 +769,7 @@ Opens `http://localhost:3333` with:
 | **Editors** | Claude Code, OpenCode, Gemini CLI | **All MCP editors (Cursor, Copilot, Claude Code, Windsurf, Zed, Codex, Antigravity, OpenCode) + shell hook (OpenClaw, any terminal)** |
 | **Config file** | TOML | ✓ TOML (`~/.lean-ctx/config.toml`) |
 | **History analysis** | ✗ | ✓ `lean-ctx discover` — find uncompressed commands |
-| **Homebrew** | ✓ | ✓ `brew tap yvgude/lean-ctx && brew install lean-ctx` |
+| **Homebrew** | ✓ | ✓ `brew tap iandjx/lean-ctx && brew install lean-ctx` |
 | **Adoption tracking** | ✗ | ✓ `lean-ctx session` — adoption % |
 | **Cross-session memory** | ✗ | ✓ CCP — persists task, findings, decisions across chats |
 | **LITM-aware positioning** | ✗ | ✓ Attention-optimal context placement (primacy/recency) |
@@ -773,7 +812,7 @@ rm -rf ~/.lean-ctx
 
 ## Contributing
 
-Contributions welcome! Please open an issue or PR on [GitHub](https://github.com/yvgude/lean-ctx).
+Contributions welcome! Please open an issue or PR on [GitHub](https://github.com/iandjx/lean-ctx).
 
 - [Discord](https://discord.gg/pTHkG9Hew9)
 - [Buy me a coffee](https://buymeacoffee.com/yvgude)
